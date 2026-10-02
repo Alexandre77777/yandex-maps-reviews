@@ -72,6 +72,23 @@ TAIL = r"""selector => {
 }"""
 # Повторно используем то же определение последнего отзыва при ожидании.
 TAIL_CHANGED = f"({{selector,before}}) => {{const current=({TAIL})(selector); return current !== null && current !== before;}}"
+# Выводим конец списка из зоны видимости перед конечным повтором подгрузки.
+SCROLL_BACK = r"""selector => {
+  // Находим текущую карточку и её прокручиваемую панель.
+  const last = [...document.querySelectorAll(selector)].at(-1);
+  // Отсутствующий список не требует изменения позиции.
+  if (!last) return;
+  // Ищем ту же панель, которую использует обычная прокрутка.
+  for (let parent=last.parentElement; parent; parent=parent.parentElement) {
+    // Пропускаем элементы, которые не прокручиваются.
+    if (/auto|scroll/.test(getComputedStyle(parent).overflowY) && parent.scrollHeight > parent.clientHeight) {
+      // Отступаем на высоту панели и запас 600 пикселей для зоны наблюдения.
+      parent.scrollTop=Math.max(0,parent.scrollTop-parent.clientHeight-600);
+      // Другие панели страницы не меняем.
+      break;
+    }
+  }
+}"""
 # Описываем чтение видимых отзывов внутри браузера.
 EXTRACT = r"""limit => {
   // Читаем текст найденного элемента; отсутствующее значение обозначаем null.
@@ -310,6 +327,10 @@ def cache_complete(cached, oid, limit):
     if len({r.get("id") for r in reviews}) != len(reviews):
         # Сообщаем, что условие готовности или наличия проверки не выполнено.
         return False
+    # Старые ключи сокращённого текста не должны скрывать одинаковые полные записи.
+    if len({review_key(oid, r) for r in reviews}) != len(reviews):
+        # Повторный сбор восстановит ключи без объявления дубликатов разными отзывами.
+        return False
     # Отклоняем кэш, если хотя бы у одного отзыва не хватает обязательного поля.
     if any(
         # Проверяем обязательное поле сохранённого отзыва.
@@ -407,29 +428,39 @@ def load_review_cache(target, oid, limit):
     return cached
 
 
-# Переключаем публичный интерфейс на сортировку по новизне.
-def select_newest(page):
+# Выбираем существующий порядок через публичное меню отзывов.
+def select_review_order(page, label):
     # Используем кнопку именно в блоке отзывов, исключая другие меню страницы.
     button = page.locator(".business-reviews-card-view__ranking .rating-ranking-view")
     # Отсутствие доступного управления сортировкой является ошибкой выборки.
     button.wait_for(state="visible", timeout=15000)
     # Если страница уже выбрала нужный порядок, дополнительных действий не требуется.
-    if button.inner_text().strip() == "По новизне":
+    if button.inner_text().strip() == label:
         # Возвращаем подтверждённый интерфейсом порядок.
         return
     # Открываем меню обычным действием пользователя.
     button.click(timeout=10000)
     # Выбираем конкретную подпись только в меню сортировки отзывов.
-    page.locator('.rating-ranking-view__popup-line[aria-label="По новизне"]').click(timeout=10000)
+    option = page.locator(".rating-ranking-view__popup-line")
+    # Изменение атрибута доступности допускается, если видимая подпись остаётся точной.
+    option.filter(has_text=re.compile(f"^{re.escape(label)}$")).click(timeout=10000)
     # Дожидаемся смены подписи выбранного порядка.
     page.wait_for_function(
         # Дожидаемся смены подписи выбранного порядка.
-        "() => document.querySelector('.business-reviews-card-view__ranking .rating-ranking-view')?.textContent.trim() === 'По новизне'",
+        "label => document.querySelector('.business-reviews-card-view__ranking .rating-ranking-view')?.textContent.trim() === label",
+        # Передаём выбранную подпись без вставки текста в JavaScript.
+        arg=label,
         # Ограничиваем ожидание результатов поиска пятнадцатью секундами.
         timeout=15000,
     )
     # Даём динамической выдаче завершить смену порядка до первого чтения.
     page.wait_for_timeout(1500)
+
+
+# Подтверждаем новизну по меню и датам, в том числе при уже выбранной сортировке.
+def select_newest(page):
+    # Сам выбор использует только публичное управление страницей.
+    select_review_order(page, "По новизне")
     # Проверяем даты первой порции: прежняя популярная выдача не должна пройти как свежая.
     page.wait_for_function(
         """() => {
@@ -490,7 +521,17 @@ def collect(page, oid, url, target, limit, scroll_pause):
             "Сохранённый файл относится к другой организации или версии формата"
         )
     # Храним отзывы по уникальному ключу; при завершении оставляем подтверждённые в текущем DOM.
-    rows = {r["id"]: r for r in previous.get("reviews", [])}
+    rows = {}
+    # Восстанавливаем ключи по текущим полям: прежний ключ мог относиться к короткому тексту.
+    for saved in previous.get("reviews", []):
+        # Приводим полный текст HTML и DOM к одинаковой обработке внешних пробелов.
+        if isinstance(saved.get("text"), str):
+            # Слова, переносы внутри текста и знаки препинания сохраняются.
+            saved = dict(saved, text=saved["text"].strip())
+        # Пересчёт объединяет одинаковые полные версии прежних снимков.
+        saved = dict(saved, id=review_key(oid, saved))
+        # Сохраняем единственную версию с пересчитанным ключом.
+        rows[saved["id"]] = saved
     # Учитываем отзывы, найденные в HTML или DOM при текущем запуске.
     observed = set()
     # Отдельно учитываем отзывы, действительно показанные текущей страницей.
@@ -514,7 +555,18 @@ def collect(page, oid, url, target, limit, scroll_pause):
         # Сохраняем сведения об организации.
         "company": previous.get("company", {}).copy(),
         # Сохраняем счётчики запросов и HTTP-ошибки.
-        "network": {"requests": 0, "blocked_media": 0, "issues": []},
+        "network": {
+            # Сохраняем число браузерных запросов.
+            "requests": 0,
+            # Сохраняем число отменённых изображений, шрифтов и видео.
+            "blocked_media": 0,
+            # Сохраняем поле blocked_map_resources.
+            "blocked_map_resources": 0,
+            # Сохраняем обнаруженные HTTP-ошибки.
+            "issues": [],
+            # Сохраняем поле failures.
+            "failures": [],
+        },
         # Сохраняем число прокруток.
         "scrolls": 0,
         # Сохраняем число раскрытых текстов.
@@ -522,6 +574,40 @@ def collect(page, oid, url, target, limit, scroll_pause):
     }
     # Храним причину остановки, обнаруженную при загрузке ресурсов.
     stopped = {}
+
+    # Записываем сетевой отказ, у которого не было HTTP-ответа.
+    def observe_failure(request):
+        # Изображения отменены намеренно; прерванная сменой сортировки загрузка штатна.
+        if (
+            # Изображения отменены намеренно; прерванная сменой сортировки загрузка штатна.
+            request.resource_type not in {"document", "xhr", "fetch"}
+            # Изображения отменены намеренно; прерванная сменой сортировки загрузка штатна.
+            or request.failure == "net::ERR_ABORTED"
+        ):
+            # Не принимаем отмену лишнего ресурса за обрыв сети.
+            return
+        # Проверяем только загрузки публичной страницы Яндекса.
+        parsed = urlsplit(request.url)
+        # Отказы сторонней аналитики не определяют полноту отзывов.
+        if parsed.hostname not in {"yandex.ru", "yandex.com"} or not parsed.path.startswith(
+            # Отказы сторонней аналитики не определяют полноту отзывов.
+            "/maps/"
+        ):
+            # Не прерываем чтение из-за необязательного стороннего ресурса.
+            return
+        # Записываем только метаданные отказа, без тела запроса или ответа.
+        result["network"]["failures"].append(
+            {
+                # Сохраняем поле host.
+                "host": parsed.hostname,
+                # Сохраняем путь поискового снимка внутри папки результатов.
+                "path": parsed.path,
+                # Сохраняем тип загружаемого ресурса.
+                "resource_type": request.resource_type,
+                # Сохраняем поле error.
+                "error": request.failure,
+            }
+        )
 
     # Пропускаем необходимые ресурсы и отменяем загрузку изображений, шрифтов и медиа.
     def route_request(route):
@@ -532,6 +618,17 @@ def collect(page, oid, url, target, limit, scroll_pause):
             # Обновляем показатели загрузки ресурсов страницы.
             result["network"]["blocked_media"] += 1
             # Отменяем загрузку ресурса, не нужного для текстов и оценок.
+            route.abort()
+        # Тайлы карты и значки соседних объектов не используются при чтении отзывов.
+        elif urlsplit(route.request.url).hostname in {
+            # Тайлы карты и значки соседних объектов не используются при чтении отзывов.
+            "core-renderer-tiles.maps.yandex.ru",
+            # Тайлы карты и значки соседних объектов не используются при чтении отзывов.
+            "real-time-poi.maps.yandex.ru",
+        }:
+            # Отдельно учитываем отменённые данные фоновой карты.
+            result["network"]["blocked_map_resources"] += 1
+            # Содержимое отзывов и управление сортировкой остаются доступными.
             route.abort()
         # Обрабатываем альтернативный исход предыдущей проверки.
         else:
@@ -613,11 +710,22 @@ def collect(page, oid, url, target, limit, scroll_pause):
         result["observed_this_run"] = len(observed)
         # Записываем число отзывов, подтверждённых текущим DOM.
         result["observed_in_dom"] = len(dom_observed)
+        # Показываем, сколько прежних записей ещё не подтверждено текущим запуском.
+        result["unconfirmed_saved_reviews"] = sum(
+            # Показываем, сколько прежних записей ещё не подтверждено текущим запуском.
+            r["id"] not in observed
+            # Показываем, сколько прежних записей ещё не подтверждено текущим запуском.
+            for r in result["reviews"]
+        )
         # Сохраняем результат и журнал попыток на диск.
         save_result(target, result)
 
     # Обновляем отзыв по ключу, сохраняя уже полученный полный текст.
     def merge(row):
+        # DOM убирает внешние пробелы; применяем ту же обработку к встроенному HTML.
+        if isinstance(row.get("text"), str):
+            # Не изменяем пробелы и переносы внутри текста.
+            row["text"] = row["text"].strip()
         # Дополняем отзыв идентификатором для объединения записей.
         row["id"] = review_key(oid, row)
         # Отмечаем отзыв как найденный в этой попытке.
@@ -675,8 +783,24 @@ def collect(page, oid, url, target, limit, scroll_pause):
             ]
             # Только единственное совпадение достаточно для сохранения общей идентичности.
             if len(matches) == 1:
-                # Сохраняем один ключ при раскрытии этого отзыва.
-                row["id"] = matches[0]
+                # Полный текст получает устойчивый ключ, независимый от прежнего сокращения.
+                if not row["text_truncated"]:
+                    # Удаляем короткую версию и её наблюдения перед сохранением полной.
+                    old_key = matches[0]
+                    # Переносим известный исходный идентификатор в раскрытый текст.
+                    if rows[old_key].get("source_review_id"):
+                        # Сохраняем исходную идентичность записи из HTML.
+                        row["source_review_id"] = rows[old_key]["source_review_id"]
+                    # Короткая версия больше не является отдельным отзывом.
+                    del rows[old_key]
+                    # Удаляем прежнее наблюдение короткой версии.
+                    observed.discard(old_key)
+                    # Счётчик DOM должен учитывать один раскрытый отзыв.
+                    dom_observed.discard(old_key)
+                # Свёрнутый DOM использует ключ ранее сохранённого полного текста.
+                else:
+                    # Полный текст уже есть, его ключ сохраняется.
+                    row["id"] = matches[0]
         # Отмечаем окончательный ключ текущего наблюдения.
         observed.add(row["id"])
         # Получаем ранее сохранённую версию того же отзыва.
@@ -696,6 +820,8 @@ def collect(page, oid, url, target, limit, scroll_pause):
     page.route("**/*", route_request)
     # Подключаем обработчик кодов HTTP-ответов.
     page.on("response", observe_response)
+    # Сетевые отказы могут происходить без HTTP-кода.
+    page.on("requestfailed", observe_failure)
     # Обрабатываем возможную ошибку следующего этапа.
     try:
         # Ограничиваем открытие страницы тремя попытками.
@@ -725,7 +851,11 @@ def collect(page, oid, url, target, limit, scroll_pause):
                 # Заканчиваем текущий цикл после полученного результата.
                 break
             # Перехватываем указанную ошибку и сохраняем понятный итог.
-            except BrowserTimeout:
+            except (BrowserTimeout, BrowserError) as error:
+                # Повторяем только таймаут или явный сетевой отказ открытия.
+                if not isinstance(error, BrowserTimeout) and "net::ERR_" not in str(error):
+                    # Программная ошибка браузера требует общей диагностики.
+                    raise
                 # Останавливаем обработку, если сайт требует проверку пользователя.
                 if challenge(page) or stopped:
                     # Записываем причину завершения текущего этапа.
@@ -742,7 +872,14 @@ def collect(page, oid, url, target, limit, scroll_pause):
                 # Не продолжаем открытие страницы после последней попытки.
                 if attempt == 2:
                     # Записываем причину завершения текущего этапа.
-                    result["status"] = "timeout"
+                    result["status"] = (
+                        # Записываем причину завершения текущего этапа.
+                        "timeout"
+                        # Записываем причину завершения текущего этапа.
+                        if isinstance(error, BrowserTimeout)
+                        # Записываем причину завершения текущего этапа.
+                        else "network_error"
+                    )
                     # Возвращаем результат; блок finally перед этим сохранит прогресс.
                     return result
                 # Выдерживаем паузу перед следующим обращением к сайту.
@@ -866,7 +1003,9 @@ def collect(page, oid, url, target, limit, scroll_pause):
 
         # Считаем подряд идущие прокрутки без появления новых отзывов.
         stalls = 0
-        # Ограничиваем число проходов чтения и прокрутки.
+        # Сетевой отказ первого ожидания учитывается до следующего успешного прогресса.
+        failures_since_progress = len(result["network"]["failures"])
+        # Читаем и прокручиваем до цели либо конечного числа ожиданий без прогресса.
         while True:
             # Останавливаем обработку, если сайт требует проверку пользователя.
             if challenge(page):
@@ -1057,6 +1196,8 @@ def collect(page, oid, url, target, limit, scroll_pause):
                 )
                 # Считаем подряд идущие прокрутки без появления новых отзывов.
                 stalls = 0
+                # Прогресс означает восстановленную загрузку после прежнего отказа.
+                failures_since_progress = len(result["network"]["failures"])
             # Перехватываем указанную ошибку и сохраняем понятный итог.
             except BrowserTimeout:
                 # Учитываем очередное ожидание без новых отзывов.
@@ -1064,9 +1205,31 @@ def collect(page, oid, url, target, limit, scroll_pause):
                 # Завершаем попытку после трёх ожиданий без новых карточек.
                 if stalls >= 3:
                     # Записываем причину завершения текущего этапа.
-                    result["status"] = "stalled"
+                    result["status"] = (
+                        # Записываем причину завершения текущего этапа.
+                        "network_error"
+                        # Записываем причину завершения текущего этапа.
+                        if len(result["network"]["failures"]) > failures_since_progress
+                        # Записываем причину завершения текущего этапа.
+                        else "stalled"
+                    )
+                    # Число записей файла и состав текущей выдачи могут различаться.
+                    result["stall_diagnostics"] = {
+                        # Сохраняем счётчик отзывов, объявленный сайтом.
+                        "declared_reviews": declared,
+                        # Сохраняем число разных записей восстановленного файла.
+                        "saved_unique_reviews": len(rows),
+                        # Отдельно показываем число подтверждённых в текущем DOM записей.
+                        "confirmed_in_dom": len(dom_observed),
+                        # Фиксируем последнюю карточку, после которой загрузка не продвинулась.
+                        "last_review": before,
+                    }
                     # Заканчиваем текущий цикл после полученного результата.
                     break
+                # Повторный scrollTop в конец не меняет видимость уже показанного индикатора.
+                page.evaluate(SCROLL_BACK, CARDS)
+                # Даём наблюдателю видимости обработать уход из зоны подгрузки.
+                page.wait_for_timeout(500)
     # Перехватываем указанную ошибку и сохраняем понятный итог.
     # Прерывание не считается успешным завершением или пустой карточкой.
     except KeyboardInterrupt:
@@ -1112,6 +1275,8 @@ def collect(page, oid, url, target, limit, scroll_pause):
         page.unroute("**/*", route_request)
         # Удаляем обработчик ответов перед следующей организацией.
         page.remove_listener("response", observe_response)
+        # Отказы следующей карточки должны попадать в её собственный журнал.
+        page.remove_listener("requestfailed", observe_failure)
     # Возвращаем результат; блок finally перед этим сохранит прогресс.
     return result
 
@@ -1292,7 +1457,18 @@ def collect_many(
             # Сохраняем промежуточный журнал до открытия следующей страницы.
             progress("running")
             # Ограничение доступа или закрытый браузер прекращают дальнейшие запросы.
-            if result["status"] in {"captcha", "rate_limited", "access_denied", "browser_closed"}:
+            if result["status"] in {
+                # Ограничение доступа или закрытый браузер прекращают дальнейшие запросы.
+                "captcha",
+                # Ограничение доступа или закрытый браузер прекращают дальнейшие запросы.
+                "rate_limited",
+                # Ограничение доступа или закрытый браузер прекращают дальнейшие запросы.
+                "access_denied",
+                # Ограничение доступа или закрытый браузер прекращают дальнейшие запросы.
+                "browser_closed",
+                # Ограничение доступа или закрытый браузер прекращают дальнейшие запросы.
+                "network_error",
+            }:
                 # Сохраняем оставшиеся идентификаторы для следующего запуска.
                 progress("stopped")
                 # Не повторяем запросы к другим карточкам после блокировки.

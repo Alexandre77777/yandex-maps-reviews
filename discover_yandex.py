@@ -67,7 +67,7 @@ SNIPPETS = ".search-business-snippet-view"
 # Задаём расположение справочника рядом с исходным файлом.
 CATEGORY_FILE = Path(__file__).with_name("categories.json")
 # Эти состояния требуют остановки всей очереди.
-ACCESS_STOPS = {"captcha", "access_denied", "rate_limited", "browser_closed"}
+ACCESS_STOPS = {"captcha", "access_denied", "rate_limited", "browser_closed", "network_error"}
 
 # Извлекаем ссылки, координаты и подписи из текущих результатов поиска.
 SEARCH_DOM = r"""() => [...document.querySelectorAll('.search-business-snippet-view')].map(card => {

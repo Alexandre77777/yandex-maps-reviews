@@ -156,6 +156,8 @@ def fake_page(html, batch, status=200):
         ),
         # Подменяем действие браузера без обращения к внешней сети.
         wait_for_selector=lambda *args, **kwargs: None,
+        # Подтверждаем проверочные даты уже выбранной сортировки.
+        wait_for_function=lambda *args, **kwargs: None,
         # Возвращаем вымышленный HTML для проверки извлечения.
         content=lambda: html,
         # Возвращаем заранее подготовленный DOM вместо сетевого чтения.
@@ -510,7 +512,7 @@ class ReviewTests(unittest.TestCase):
         # Запрещаем любые внешние загрузки.
         page.route("**/*", lambda route: route.abort())
         # Готовим элементы с теми же селекторами, что у публичной страницы.
-        html = '<div class="business-reviews-card-view__ranking"><div class="rating-ranking-view">По умолчанию</div></div><div class="rating-ranking-view__popup-line" aria-label="По новизне" style="display:none">По новизне</div><div class="business-reviews-card-view__review"><meta itemprop="datePublished" content="2026-09-01"></div><div class="business-reviews-card-view__review"><meta itemprop="datePublished" content="2026-09-02"></div>'
+        html = '<div class="business-reviews-card-view__ranking"><div class="rating-ranking-view">По умолчанию</div></div><div class="rating-ranking-view__popup-line" aria-label="Сортировать отзывы" style="display:none">По новизне</div><div class="business-reviews-card-view__review"><meta itemprop="datePublished" content="2026-09-01"></div><div class="business-reviews-card-view__review"><meta itemprop="datePublished" content="2026-09-02"></div>'
         # Закрываем страницу при любом исходе теста.
         try:
             # Загружаем вымышленную популярную выдачу с неупорядоченными датами.
@@ -578,7 +580,11 @@ class ReviewTests(unittest.TestCase):
         # Ожидание должно завершиться, хотя число карточек не выросло.
         self.page.wait_for_function(
             # Ожидание должно завершиться, хотя число карточек не выросло.
-            TAIL_CHANGED, arg={"selector": CARDS, "before": before}, timeout=1000
+            TAIL_CHANGED,
+            # Ожидание должно завершиться, хотя число карточек не выросло.
+            arg={"selector": CARDS, "before": before},
+            # Ожидание должно завершиться, хотя число карточек не выросло.
+            timeout=1000,
         )
         # Размер виртуального окна действительно остался прежним.
         self.assertEqual(self.page.locator(CARDS).count(), 2)
