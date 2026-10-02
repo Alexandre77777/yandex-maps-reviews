@@ -1,0 +1,207 @@
+<!-- Используем стандартный HTML без сборщика интерфейса. -->
+<!doctype html>
+<!-- Задаём русский язык страницы. -->
+<html lang="ru">
+<head>
+  <!-- Сохраняем русские названия в UTF-8. -->
+  <meta charset="utf-8">
+  <!-- Подстраиваем интерфейс под ширину экрана. -->
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <!-- Показываем назначение страницы во вкладке браузера. -->
+  <title>Территория и категории · Yandex Maps Reviews</title>
+  <!-- Подключаем оформление карты фиксированной версии Leaflet. -->
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+  <!-- Подключаем оформление инструмента прямоугольного выделения. -->
+  <link rel="stylesheet" href="https://unpkg.com/leaflet-draw@1.0.4/dist/leaflet.draw.css">
+  <!-- Оформляем страницу средствами браузера. -->
+  <style>
+    /* Задаём общий шрифт, цвет текста и фон. */
+    body { margin: 0; font-family: system-ui, sans-serif; color: #203040; background: #f3f6fa; }
+    /* Размещаем настройки рядом с картой. */
+    main { display: grid; grid-template-columns: 380px 1fr; height: 100vh; }
+    /* Оставляем настройки доступными при небольшой высоте окна. */
+    aside { padding: 24px; overflow-y: auto; background: white; box-shadow: 1px 0 8px #20304015; }
+    /* Подчёркиваем название без крупного баннера. */
+    h1 { font-size: 24px; margin: 0 0 8px; }
+    /* Разделяем действия и настройки по смыслу. */
+    h2 { font-size: 17px; margin: 24px 0 10px; }
+    /* Делаем пояснения компактными и читаемыми. */
+    p { font-size: 14px; line-height: 1.55; }
+    /* Подсвечиваем ссылки на справочник и источники. */
+    a { color: #1765c2; }
+    /* Показываем действия обычными кнопками браузера. */
+    button { border: 0; border-radius: 8px; background: #1765c2; color: white; padding: 12px 16px; cursor: pointer; font: inherit; }
+    /* Отключённое действие не должно выглядеть доступным. */
+    button:disabled { background: #a7b6c5; cursor: default; }
+    /* Делаем поля настроек удобными для ввода. */
+    input[type=text], textarea { box-sizing: border-box; width: 100%; padding: 10px; border: 1px solid #cbd5df; border-radius: 6px; font: inherit; }
+    /* Ограничиваем высоту списка, сохраняя доступ ко всем категориям. */
+    #categories { max-height: 240px; overflow-y: auto; border: 1px solid #e0e7ef; border-radius: 8px; padding: 8px; }
+    /* Размещаем каждую категорию с отдельным флажком. */
+    .category { display: flex; gap: 8px; align-items: center; padding: 6px; font-size: 14px; }
+    /* Внешние границы карты заполняют свободное место. */
+    #map { min-height: 420px; }
+    /* Команда запуска допускает перенос длинного текста. */
+    code { display: block; padding: 12px; margin-top: 12px; font-size: 12px; background: #eef3f8; white-space: pre-wrap; overflow-wrap: anywhere; }
+    /* Сообщения не зависят от всплывающих окон браузера. */
+    #status { min-height: 32px; color: #52677d; }
+    /* На узком экране карта и настройки располагаются друг под другом. */
+    @media (max-width: 760px) { main { display: flex; flex-direction: column; height: auto; } #map { height: 60vh; order: -1; } aside { padding: 18px; } }
+  </style>
+</head>
+<body>
+  <!-- Объединяем настройки территории и карту. -->
+  <main>
+    <!-- Отображаем все необходимые действия в одной панели. -->
+    <aside>
+      <!-- Обозначаем первый этап сбора. -->
+      <h1>🗺️ Территория и категории</h1>
+      <!-- Объясняем, зачем нужна подложка OSM. -->
+      <p>Выберите участок на карте и категории организаций. Карта использует подложку OSM; организации и отзывы будут найдены на Яндекс Картах.</p>
+      <!-- Предлагаем выделить прямоугольник вместо ручного ввода координат. -->
+      <h2>1. Область поиска</h2>
+      <!-- Перезапуск выделения заменяет прежний прямоугольник. -->
+      <button id="draw" type="button">Выделить прямоугольник</button>
+      <!-- Показываем проверяемый порядок границ. -->
+      <p>Приблизьте нужный участок, нажмите кнопку и протяните прямоугольник. Границы: запад, юг, восток, север.</p>
+      <!-- Координаты нельзя случайно изменить отдельно от выбранного прямоугольника. -->
+      <input id="bounds" type="text" readonly aria-label="Границы выбранной территории" placeholder="Территория пока не выбрана">
+      <!-- Отделяем категории организаций от геометрических объектов. -->
+      <h2>2. Категории организаций</h2>
+      <!-- Загрузка списка из JSON сохраняет единый источник названий. -->
+      <div id="categories" aria-label="Категории организаций">Загрузка списка…</div>
+      <!-- Даём прямую ссылку на внешний официальный справочник. -->
+      <p><a href="https://yandex.ru/support/nmaps/ru/app_poi" target="_blank" rel="noopener">Официальный рубрикатор Яндекса</a>. Готовый список в приложении ограничен; для другой категории добавьте свой запрос.</p>
+      <!-- Свободный поиск остаётся отдельным, явно обозначенным режимом. -->
+      <label for="queries">Свои запросы, по одному в строке</label>
+      <!-- Пользователь может добавить объекты, отсутствующие в предустановках. -->
+      <textarea id="queries" rows="3" placeholder="Например: дом культуры"></textarea>
+      <!-- Уточняем различие здания и карточки с отзывами. -->
+      <p>Для недвижимости выберите «Жилые комплексы». Обычный дом по адресу может не иметь карточки организации с отзывами. Для своих запросов заранее заданная рубрика не проверяется.</p>
+      <!-- Экспорт не запускает сбор скрытно из страницы настройки. -->
+      <h2>3. Сохранение параметров</h2>
+      <!-- Экспорт доступен только после выбора территории и поиска. -->
+      <button id="export" type="button" disabled>Скачать area.json</button>
+      <!-- Объясняем передачу файла модулю сбора. -->
+      <p>Поместите файл в папку репозитория. Выполните команду в терминале этой папки:</p>
+      <!-- Команда использует окружение Windows, описанное в README. -->
+      <code>.\.venv\Scripts\python.exe discover_yandex.py --config area.json --with-reviews</code>
+      <!-- Выводим сообщения о выборе и ошибках прямо в панели. -->
+      <p id="status" role="status">Выберите территорию на карте.</p>
+    </aside>
+    <!-- Карта используется только для выбора прямоугольника. -->
+    <div id="map" aria-label="Карта выбора территории"></div>
+  </main>
+  <!-- Загружаем библиотеку отображения карты. -->
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <!-- Загружаем готовый инструмент рисования прямоугольника. -->
+  <script src="https://unpkg.com/leaflet-draw@1.0.4/dist/leaflet.draw.js"></script>
+  <!-- Настраиваем выбор территории и экспорт JSON в браузере. -->
+  <script>
+    // Показываем начальный участок Томска; карту можно перемещать и масштабировать.
+    const map = L.map('map').setView([56.47, 84.985], 13);
+    // Загружаем обычные изображения подложки с обязательным указанием источника.
+    L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {maxZoom: 19, attribution: '© <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>'}).addTo(map);
+    // Создаём слой только для выбранного прямоугольника.
+    const area = L.featureGroup().addTo(map);
+    // Храним границы без округления значений в экспортируемом файле.
+    let bbox = null;
+    // Подготавливаем элемент сообщений.
+    const status = document.getElementById('status');
+    // Подготавливаем кнопку сохранения.
+    const exportButton = document.getElementById('export');
+    // Читаем ключи выбранных категорий из флажков.
+    const selectedCategories = () => [...document.querySelectorAll('#categories input:checked')].map(input => input.value);
+    // Читаем отдельные свободные запросы и удаляем пустые строки.
+    const selectedQueries = () => document.getElementById('queries').value.split('\n').map(value => value.trim()).filter(Boolean);
+    // Обновляем доступность экспорта после любого изменения выбора.
+    const update = () => { exportButton.disabled = !bbox || (!selectedCategories().length && !selectedQueries().length); };
+    // Переводим подсказку готового инструмента рисования на русский.
+    L.drawLocal.draw.handlers.rectangle.tooltip.start = 'Нажмите и протяните прямоугольник.';
+    // Показываем понятную подсказку завершения рисования.
+    L.drawLocal.draw.handlers.simpleshape.tooltip.end = 'Отпустите кнопку мыши для завершения.';
+    // Создаём один обработчик рисования, чтобы повторное нажатие не дублировало события.
+    const drawer = new L.Draw.Rectangle(map);
+    // Включаем готовый инструмент выделения по кнопке.
+    document.getElementById('draw').addEventListener('click', () => drawer.enable());
+    // Новый прямоугольник заменяет прежний выбор.
+    map.on('draw:created', event => {
+      // Удаляем предыдущую геометрию выделения.
+      area.clearLayers();
+      // Добавляем выбранный прямоугольник на карту.
+      area.addLayer(event.layer);
+      // Получаем точные границы из геометрии.
+      const bounds = event.layer.getBounds();
+      // Записываем координаты в порядке, принимаемом модулем поиска.
+      bbox = [bounds.getWest(), bounds.getSouth(), bounds.getEast(), bounds.getNorth()];
+      // Округляем только отображение, сохраняя точные значения для JSON.
+      document.getElementById('bounds').value = bbox.map(value => value.toFixed(6)).join(', ');
+      // Подтверждаем выбор территории.
+      status.textContent = 'Территория выбрана. Выберите категории и сохраните параметры.';
+      // Проверяем готовность к экспорту.
+      update();
+    });
+    // Следим за изменением выбранных категорий.
+    document.getElementById('categories').addEventListener('change', update);
+    // Следим за изменением собственных поисковых выражений.
+    document.getElementById('queries').addEventListener('input', update);
+    // Сохраняем только параметры выбора, не запуская сетевой сбор.
+    exportButton.addEventListener('click', () => {
+      // Формируем конфиг, совместимый с параметром --config.
+      const config = {bbox, categories: selectedCategories(), queries: selectedQueries()};
+      // Создаём локальный файл UTF-8 средствами браузера.
+      const blob = new Blob([JSON.stringify(config, null, 2)], {type: 'application/json;charset=utf-8'});
+      // Создаём временную ссылку на файл в памяти.
+      const url = URL.createObjectURL(blob);
+      // Подготавливаем обычную загрузку файла.
+      const link = document.createElement('a');
+      // Передаём ссылку на сформированный JSON.
+      link.href = url;
+      // Задаём имя экспортируемого конфига.
+      link.download = 'area.json';
+      // Запускаем сохранение по явному нажатию пользователя.
+      link.click();
+      // Освобождаем временную ссылку после начала загрузки.
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+      // Напоминаем, куда передать конфиг.
+      status.textContent = 'area.json сохранён. Поместите его в папку репозитория и выполните команду.';
+    });
+    // Загружаем общий справочник из локальной папки через обычный статический сервер.
+    fetch('categories.json').then(response => {
+      // Отличаем отсутствие файла от корректного JSON.
+      if (!response.ok) throw new Error('Не удалось прочитать categories.json');
+      // Разбираем локальный JSON средствами браузера.
+      return response.json();
+    }).then(catalog => {
+      // Находим контейнер списка категорий.
+      const container = document.getElementById('categories');
+      // Удаляем временную надпись о загрузке.
+      container.textContent = '';
+      // Создаём флажок для каждой предустановки.
+      for (const [key, item] of Object.entries(catalog.categories)) {
+        // Объединяем флажок и название в доступную для нажатия подпись.
+        const label = document.createElement('label');
+        // Применяем единое оформление строки.
+        label.className = 'category';
+        // Создаём флажок выбора.
+        const input = document.createElement('input');
+        // Разрешаем выбрать несколько категорий одновременно.
+        input.type = 'checkbox';
+        // Ключ совпадает с ключом Python-справочника.
+        input.value = key;
+        // По умолчанию выбираем одну понятную категорию.
+        input.checked = key === 'cafe';
+        // Добавляем текст без исполнения HTML из файла категорий.
+        label.append(input, document.createTextNode(item.label));
+        // Показываем категорию в общей панели.
+        container.append(label);
+      }
+      // Учитываем загруженные флажки при готовности экспорта.
+      update();
+    }).catch(error => {
+      // Объясняем необходимость запуска локального статического сервера.
+      status.textContent = error.message + '. Откройте страницу через локальный сервер по инструкции README.';
+    });
+  </script>
+</body>
+</html>

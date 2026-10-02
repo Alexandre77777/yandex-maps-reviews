@@ -365,6 +365,12 @@ class ReviewTests(unittest.TestCase):
 
     # Проверяем ключ отзыва, допустимые адреса и разбор Retry-After.
     def test_identity_urls_and_retry_header(self):
+        # При отсутствии автора пробелы по краям не должны создавать два ключа.
+        anonymous = {"date": "2026-09-01", "text": "Полный текст\n"}
+        # Проверяем объединение HTML и DOM анонимного отзыва.
+        self.assertEqual(review_key(OID, anonymous), review_key(OID, dict(anonymous, text="Полный текст")))
+        # Надпись «Анонимный отзыв» в DOM должна соответствовать отсутствующему имени в HTML.
+        self.assertEqual(review_key(OID, anonymous), review_key(OID, dict(anonymous, author="Анонимный отзыв", text="Полный текст")))
         # Получаем отдельный отзыв для проверки его полей.
         row = {
             # Сохраняем публичную ссылку на профиль автора.
