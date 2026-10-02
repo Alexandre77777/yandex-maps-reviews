@@ -1,0 +1,13 @@
+# Окружения и временные файлы Python.
+.venv/
+__pycache__/
+*.py[cod]
+.ruff_cache/
+# Результаты остаются на компьютере пользователя.
+review_results/
+*.json.tmp
+# Локальные настройки редакторов и операционной системы.
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
