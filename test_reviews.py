@@ -145,8 +145,14 @@ def fake_page(html, batch, status=200):
         remove_listener=lambda *args: None,
         # Имитируем обычный текст страницы без признаков CAPTCHA.
         locator=lambda *args: SimpleNamespace(
+            # Подменённый браузер уже выбрал нужный порядок отзывов.
+            wait_for=lambda **kwargs: None,
             # Имитируем обычный текст страницы без признаков CAPTCHA.
-            inner_text=lambda **kwargs: "Пример организации"
+            inner_text=lambda **kwargs: "По новизне"
+            # Возвращаем подмену страницы с управляемыми ответами.
+            if "ranking" in args[0]
+            # Возвращаем подмену страницы с управляемыми ответами.
+            else "Пример организации",
         ),
         # Подменяем действие браузера без обращения к внешней сети.
         wait_for_selector=lambda *args, **kwargs: None,
@@ -373,7 +379,9 @@ class ReviewTests(unittest.TestCase):
         # Проверяем объединение HTML и DOM анонимного отзыва.
         self.assertEqual(
             # Проверяем объединение HTML и DOM анонимного отзыва.
-            review_key(OID, anonymous), review_key(OID, dict(anonymous, text="Полный текст"))
+            review_key(OID, anonymous),
+            # Проверяем объединение HTML и DOM анонимного отзыва.
+            review_key(OID, dict(anonymous, text="Полный текст")),
         )
         # Надпись «Анонимный отзыв» в DOM должна соответствовать отсутствующему имени в HTML.
         self.assertEqual(
@@ -441,7 +449,9 @@ class ReviewTests(unittest.TestCase):
         # Короткие тексты должны быть префиксами их полных версий.
         cards = cards.replace("Короткий текст 0", "Полный текст отзыва 0.").replace(
             # Короткие тексты должны быть префиксами их полных версий.
-            "Короткий текст 1", "Полный текст отзыва 1."
+            "Короткий текст 1",
+            # Короткие тексты должны быть префиксами их полных версий.
+            "Полный текст отзыва 1.",
         )
         # Формируем первую порцию HTML и два свёрнутых DOM-отзыва.
         html = (
@@ -489,6 +499,89 @@ class ReviewTests(unittest.TestCase):
         finally:
             # Общий браузер класса остаётся доступен другим проверкам.
             page.close()
+
+    # Проверяем переключение публичного меню в настоящем браузере без сети.
+    def test_newest_sort_menu_in_browser(self):
+        # Импортируем управление сортировкой для отдельной проверки интерфейса.
+        from collect_yandex import select_newest
+
+        # Открываем локальную страницу с разрешёнными обработчиками событий.
+        page = self.browser.new_page()
+        # Запрещаем любые внешние загрузки.
+        page.route("**/*", lambda route: route.abort())
+        # Готовим элементы с теми же селекторами, что у публичной страницы.
+        html = '<div class="business-reviews-card-view__ranking"><div class="rating-ranking-view">По умолчанию</div></div><div class="rating-ranking-view__popup-line" aria-label="По новизне" style="display:none">По новизне</div><div class="business-reviews-card-view__review"><meta itemprop="datePublished" content="2026-09-01"></div><div class="business-reviews-card-view__review"><meta itemprop="datePublished" content="2026-09-02"></div>'
+        # Закрываем страницу при любом исходе теста.
+        try:
+            # Загружаем вымышленную популярную выдачу с неупорядоченными датами.
+            page.set_content(html)
+            # Два обычных клика должны изменить меню и порядок карточек.
+            page.evaluate(
+                """() => {
+              // Находим кнопку в блоке отзывов.
+              const button=document.querySelector('.rating-ranking-view');
+              // Находим скрытый пункт меню.
+              const option=document.querySelector('.rating-ranking-view__popup-line');
+              // Открытие меню делает выбор доступным.
+              button.addEventListener('click',()=>{option.style.display='block';});
+              // Выбор меняет подпись и переставляет отзывы.
+              option.addEventListener('click',()=>{
+                // Публичная подпись подтверждает выбранный порядок.
+                button.textContent='По новизне';
+                // Переставляем старый отзыв после нового.
+                document.body.appendChild(document.querySelector('.business-reviews-card-view__review'));
+                // Закрываем меню после выбора.
+                option.style.display='none';
+              });
+            }"""
+            )
+            # Выполняем настоящую функцию управления интерфейсом.
+            select_newest(page)
+            # Подпись меню должна подтвердить новый порядок.
+            self.assertEqual(page.locator(".rating-ranking-view").inner_text(), "По новизне")
+            # Проверяем порядок видимых дат после переключения.
+            self.assertEqual(
+                # Проверяем порядок видимых дат после переключения.
+                page.locator('[itemprop="datePublished"]').first.get_attribute("content"),
+                # Проверяем порядок видимых дат после переключения.
+                "2026-09-02",
+            )
+        # Не оставляем вкладку после завершения проверки.
+        finally:
+            # Освобождаем локальную страницу.
+            page.close()
+
+    # Проверяем ожидание новой карточки при постоянном числе узлов в настоящем DOM.
+    def test_virtualized_tail_wait_in_browser(self):
+        # Используем тот же сценарий ожидания, что у живого сборщика.
+        from collect_yandex import TAIL, TAIL_CHANGED, CARDS
+
+        # Страница остаётся локальной и не выполняет внешние загрузки.
+        self.page.set_content(example_html(2, 3))
+        # Запоминаем последний текущий отзыв.
+        before = self.page.evaluate(TAIL, CARDS)
+        # Заменяем старую карточку новой, сохранив размер окна.
+        self.page.evaluate(
+            """() => {
+          // Получаем два исходных отзыва локальной страницы.
+          const cards=[...document.querySelectorAll('.business-reviews-card-view__review')];
+          // Новая карточка имеет другой текст, как у анонимного отзыва с той же датой.
+          const next=cards[1].cloneNode(true);
+          // Различаем записи по содержанию, а не количеству элементов.
+          next.querySelector('.spoiler-view__text-container').textContent='Новый последний отзыв';
+          // Удаляем ушедшую из окна первую карточку.
+          cards[0].remove();
+          // Добавляем новую последнюю карточку.
+          cards[1].parentNode.appendChild(next);
+        }"""
+        )
+        # Ожидание должно завершиться, хотя число карточек не выросло.
+        self.page.wait_for_function(
+            # Ожидание должно завершиться, хотя число карточек не выросло.
+            TAIL_CHANGED, arg={"selector": CARDS, "before": before}, timeout=1000
+        )
+        # Размер виртуального окна действительно остался прежним.
+        self.assertEqual(self.page.locator(CARDS).count(), 2)
 
 
 # Выполняем запуск только при прямом вызове файла.

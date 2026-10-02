@@ -36,13 +36,17 @@ from area_geometry import load_boundary
 # Читаем кэш с сохранением повреждённых оригиналов и блокируем общую папку.
 from storage import read_snapshot, output_lock
 
-# Проверяем структуру частично собранных отзывов.
-from collect_yandex import review_snapshot_valid, run_cli
+# Обрабатываем ошибки запуска одинаково для обоих сборщиков.
+from collect_yandex import run_cli
 
 # Повторно используем сбор отзывов, проверку кэша и сохранение результатов.
 from collect_yandex import (
     # Подключаем проверку достаточности сохранённых отзывов.
     cache_complete,
+    # Разделяем полные снимки и выборки с заданным лимитом.
+    review_target,
+    # Повторно используем сбор отзывов, проверку кэша и сохранение результатов.
+    load_review_cache,
     # Подключаем проверку ссылки и идентификатора организации.
     canonical_url,
     # Подключаем распознавание проверки пользователя.
@@ -879,12 +883,14 @@ def main():
     parser.add_argument(
         # Задаём имя параметра командной строки.
         "--review-limit",
+        # Используем общее имя ограничения числа отзывов.
+        "--max-reviews",
         # Преобразуем заданный объём в целое число.
         type=int,
-        # По умолчанию собираем до ста отзывов на организацию.
-        default=100,
+        # По умолчанию собираем все доступные отзывы организации.
+        default=None,
         # Показываем назначение этого параметра в справке запуска.
-        help="Число отзывов на организацию: 1–300",
+        help="Максимум самых свежих отзывов на организацию; без параметра собираем все",
     )
     # Задаём задержку между разными поисковыми заданиями и карточками.
     parser.add_argument(
@@ -1028,7 +1034,7 @@ def main():
             # Проверяем объёмы, повторы и неотрицательные конечные длительности.
             1 <= args.max_orgs <= 100
             # Проверяем объёмы, повторы и неотрицательные конечные длительности.
-            and 1 <= args.review_limit <= 300
+            and (args.review_limit is None or args.review_limit >= 1)
             # Проверяем объёмы, повторы и неотрицательные конечные длительности.
             and 0 <= args.rate_retries <= 3
             # Проверяем объёмы, повторы и неотрицательные конечные длительности.
@@ -1043,7 +1049,7 @@ def main():
             # Не допускаем чрезмерно частые запросы и неверные размеры.
             raise ValueError(
                 # Не допускаем чрезмерно частые запросы и неверные размеры.
-                "Требуется: max-orgs 1–100; review-limit 1–300; 429-retries 0–3; pause >= 10; scroll-pause >= 3"
+                "Требуется: max-orgs 1–100; review-limit >= 1 либо без лимита; 429-retries 0–3; pause >= 10; scroll-pause >= 3"
             )
     # Отклоняем некорректный ввод до открытия браузера.
     except (ValueError, TypeError, AttributeError, OSError) as error:
@@ -1131,9 +1137,9 @@ def main():
                 # Проверяем достаточность снимка каждой найденной организации.
                 for oid in cached_organizations:
                     # Используем отдельную папку результатов отзывов.
-                    target = args.output / "reviews" / f"{oid}.json"
+                    target = review_target(args.output / "reviews", oid, args.review_limit)
                     # Читаем предыдущий результат или обозначаем его отсутствие.
-                    snapshot = read_snapshot(target, review_snapshot_valid)
+                    snapshot = load_review_cache(target, oid, args.review_limit)
                     # Достаточность проверяется правилами существующего сборщика.
                     reviews_ready = reviews_ready and cache_complete(
                         # Достаточность проверяется правилами существующего сборщика.
@@ -1344,9 +1350,9 @@ def main():
                     # Проверяем каждую уникальную организацию.
                     for oid, row in organizations.items():
                         # Выбираем снимок найденной организации.
-                        target = review_folder / f"{oid}.json"
+                        target = review_target(review_folder, oid, args.review_limit)
                         # Сохраняем повреждённый оригинал перед новым сбором.
-                        cached = read_snapshot(target, review_snapshot_valid)
+                        cached = load_review_cache(target, oid, args.review_limit)
                         # Принудительное обновление или неполный снимок требуют посещения страницы.
                         if args.refresh or not cache_complete(cached, oid, args.review_limit):
                             # Добавляем карточку в последовательную очередь.

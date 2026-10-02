@@ -54,6 +54,24 @@ from storage import save_result, read_snapshot, output_lock
 CARDS = ".business-reviews-card-view__review"
 # Задаём версию формата сохранённых результатов.
 SCHEMA_VERSION = 1
+# Отслеживаем последний отзыв даже при замене карточек в виртуализированной выдаче.
+TAIL = r"""selector => {
+  // Ищем последнюю текущую карточку, не сохраняя устаревший DOM-узел.
+  const last = [...document.querySelectorAll(selector)].at(-1);
+  // Пустая временная выдача не подтверждает появление нового отзыва.
+  if (!last) return null;
+  // Сопоставляем дату, профиль и начало текста; число узлов может оставаться прежним.
+  return JSON.stringify([
+    // Читаем дату последнего отзыва.
+    last.querySelector('[itemprop="datePublished"]')?.getAttribute('content'),
+    // Читаем публичный профиль, если он доступен.
+    last.querySelector('.business-review-view__link')?.getAttribute('href'),
+    // Анонимные отзывы различаем также по тексту.
+    last.querySelector('[itemprop="reviewBody"], .business-review-view__body')?.textContent.trim().slice(0,160)
+  ]);
+}"""
+# Повторно используем то же определение последнего отзыва при ожидании.
+TAIL_CHANGED = f"({{selector,before}}) => {{const current=({TAIL})(selector); return current !== null && current !== before;}}"
 # Описываем чтение видимых отзывов внутри браузера.
 EXTRACT = r"""limit => {
   // Читаем текст найденного элемента; отсутствующее значение обозначаем null.
@@ -61,7 +79,7 @@ EXTRACT = r"""limit => {
   // Читаем атрибут content, которым размечены оценки и даты.
   const content = (root, selector) => root.querySelector(selector)?.getAttribute('content') || null;
   // Обрабатываем карточки отзывов в пределах указанного лимита.
-  const reviews = [...document.querySelectorAll('.business-reviews-card-view__review')].slice(0, limit).map(card => {
+  const reviews = [...document.querySelectorAll('.business-reviews-card-view__review')].slice(0, limit ?? undefined).map(card => {
     // Ищем текст только внутри текущего отзыва.
     const body = card.querySelector('[itemprop="reviewBody"], .business-review-view__body');
     // Находим контейнер текста, отделённый от кнопки раскрытия.
@@ -300,6 +318,8 @@ def cache_complete(cached, oid, limit):
         or not r.get("text")
         # Дата отзыва должна присутствовать.
         or not r.get("date")
+        # Неразбираемая дата не подтверждает положение в свежей выборке.
+        or review_date(r) == datetime.min.replace(tzinfo=timezone.utc)
         # Проверяем обязательное поле сохранённого отзыва.
         or type(r.get("rating")) is not int
         # Допускаем только оценки от 1 до 5.
@@ -316,7 +336,111 @@ def cache_complete(cached, oid, limit):
         # Проверяем, достаточно ли сохранённых отзывов для указанного запроса.
         return len(reviews) == cached.get("company", {}).get("reviews_count")
     # Проверяем, достаточно ли сохранённых отзывов для указанного запроса.
-    return cached.get("status") == "capped" and len(reviews) >= limit
+    return (
+        # Проверяем, достаточно ли сохранённых отзывов для указанного запроса.
+        limit is not None
+        # Проверяем, достаточно ли сохранённых отзывов для указанного запроса.
+        and cached.get("status") == "capped"
+        # Проверяем, достаточно ли сохранённых отзывов для указанного запроса.
+        and cached.get("review_order") == "newest"
+        # Проверяем, достаточно ли сохранённых отзывов для указанного запроса.
+        and len(reviews) >= limit
+    )
+
+
+# Выбираем отдельный файл для каждого лимита, сохраняя полный снимок.
+def review_target(folder, oid, limit):
+    # Полный сбор использует прежнее имя; ограниченные выборки не затирают его.
+    suffix = "" if limit is None else f".limit{limit}"
+    # Возвращаем путь одного результата для CLI и географического поиска.
+    return Path(folder) / f"{oid}{suffix}.json"
+
+
+# Сортируем по дате отзыва, приводя разные записи ISO к одному часовому поясу.
+def review_date(row):
+    # Отсутствующая или неверная дата остаётся последней и не исправляется догадкой.
+    try:
+        # Поддерживаем как дату, так и ISO-время с часовым поясом.
+        value = datetime.fromisoformat(row["date"].replace("Z", "+00:00"))
+        # Для даты без часового пояса используем UTC.
+        return (
+            # Для даты без часового пояса используем UTC.
+            value.replace(tzinfo=timezone.utc)
+            # Для даты без часового пояса используем UTC.
+            if value.tzinfo is None
+            # Для даты без часового пояса используем UTC.
+            else value.astimezone(timezone.utc)
+        )
+    # Некорректное значение не должно уничтожать остальные отзывы.
+    except (KeyError, AttributeError, TypeError, ValueError):
+        # Такие поля помечаются как неполные при проверке результата.
+        return datetime.min.replace(tzinfo=timezone.utc)
+
+
+# Используем готовый полный снимок для меньшего лимита без посещения сайта.
+def load_review_cache(target, oid, limit):
+    # Сначала проверяем собственный файл этой выборки.
+    cached = read_snapshot(target, review_snapshot_valid)
+    # Без полного снимка или при уже существующей выборке проекция не нужна.
+    if cached or limit is None:
+        # Незавершённый собственный снимок нужен для возобновления.
+        return cached
+    # Полный файл сохраняется отдельно и не изменяется при выборе меньшего объёма.
+    full = read_snapshot(review_target(target.parent, oid, None), review_snapshot_valid)
+    # Только готовый полный снимок подтверждает свежесть локальной выборки.
+    if not cache_complete(full, oid, None):
+        # При отсутствии полного кэша выполняем обычный сбор.
+        return {}
+    # Копируем верхний уровень, сохраняя исходный полный файл.
+    cached = dict(full)
+    # Выбираем самые свежие записи полного снимка.
+    cached["reviews"] = sorted(full["reviews"], key=review_date, reverse=True)[:limit]
+    # Отмечаем фактический объём и порядок локальной выборки.
+    cached.update(limit=limit, review_order="newest", valid_reviews=len(cached["reviews"]))
+    # При меньшем числе отзывов выборка также является полной.
+    cached["status"] = "complete" if len(full["reviews"]) <= limit else "capped"
+    # Показываем происхождение выборки для последующей диагностики.
+    cached["cache_source"] = "complete_snapshot"
+    # Записываем отдельный файл, не открывая браузер.
+    save_result(target, cached)
+    # Передаём результат обычной проверке готовности.
+    return cached
+
+
+# Переключаем публичный интерфейс на сортировку по новизне.
+def select_newest(page):
+    # Используем кнопку именно в блоке отзывов, исключая другие меню страницы.
+    button = page.locator(".business-reviews-card-view__ranking .rating-ranking-view")
+    # Отсутствие доступного управления сортировкой является ошибкой выборки.
+    button.wait_for(state="visible", timeout=15000)
+    # Если страница уже выбрала нужный порядок, дополнительных действий не требуется.
+    if button.inner_text().strip() == "По новизне":
+        # Возвращаем подтверждённый интерфейсом порядок.
+        return
+    # Открываем меню обычным действием пользователя.
+    button.click(timeout=10000)
+    # Выбираем конкретную подпись только в меню сортировки отзывов.
+    page.locator('.rating-ranking-view__popup-line[aria-label="По новизне"]').click(timeout=10000)
+    # Дожидаемся смены подписи выбранного порядка.
+    page.wait_for_function(
+        # Дожидаемся смены подписи выбранного порядка.
+        "() => document.querySelector('.business-reviews-card-view__ranking .rating-ranking-view')?.textContent.trim() === 'По новизне'",
+        # Ограничиваем ожидание результатов поиска пятнадцатью секундами.
+        timeout=15000,
+    )
+    # Даём динамической выдаче завершить смену порядка до первого чтения.
+    page.wait_for_timeout(1500)
+    # Проверяем даты первой порции: прежняя популярная выдача не должна пройти как свежая.
+    page.wait_for_function(
+        """() => {
+      // Считываем даты только из текущих карточек отзывов.
+      const dates = [...document.querySelectorAll('.business-reviews-card-view__review [itemprop="datePublished"]')].map(n => Date.parse(n.getAttribute('content')));
+      // Не принимаем пустую выдачу или неподтверждённые даты.
+      return dates.length > 0 && dates.every((v,i) => Number.isFinite(v) && (i === 0 || dates[i-1] >= v));
+    }""",
+        # Проверяем даты первой порции: прежняя популярная выдача не должна пройти как свежая.
+        timeout=20000,
+    )
 
 
 # Распознаём страницу проверки пользователя по адресу и видимому тексту.
@@ -461,7 +585,7 @@ def collect(page, oid, url, target, limit, scroll_pause):
     # Пересчитываем показатели полноты и записываем текущие отзывы на диск.
     def checkpoint():
         # Обновляем список сохранённых отзывов.
-        result["reviews"] = list(rows.values())
+        result["reviews"] = sorted(rows.values(), key=review_date, reverse=True)[:limit]
         # Измеряем время текущей попытки, включая ожидания.
         result["elapsed_seconds"] = round(time.monotonic() - started, 2)
         # Считаем отзывы с текстом, датой, целой оценкой 1–5 и без сокращений.
@@ -470,6 +594,8 @@ def collect(page, oid, url, target, limit, scroll_pause):
             bool(r["text"])
             # Учитываем обязательные поля и отсутствие сокращения текста.
             and bool(r.get("date"))
+            # Неразбираемая дата не является заполненным обязательным полем.
+            and review_date(r) != datetime.min.replace(tzinfo=timezone.utc)
             # Учитываем обязательные поля и отсутствие сокращения текста.
             and type(r["rating"]) is int
             # Учитываем обязательные поля и отсутствие сокращения текста.
@@ -477,12 +603,12 @@ def collect(page, oid, url, target, limit, scroll_pause):
             # Учитываем обязательные поля и отсутствие сокращения текста.
             and not r["text_truncated"]
             # Последовательно обрабатываем записи указанного набора.
-            for r in rows.values()
+            for r in result["reviews"]
         )
         # Считаем отзывы без распознанной оценки.
-        result["invalid_rating_count"] = sum(r["rating"] is None for r in rows.values())
+        result["invalid_rating_count"] = sum(r["rating"] is None for r in result["reviews"])
         # Считаем тексты, которые остались сокращёнными.
-        result["truncated_count"] = sum(r["text_truncated"] for r in rows.values())
+        result["truncated_count"] = sum(r["text_truncated"] for r in result["reviews"])
         # Записываем число отзывов, найденных в этой попытке.
         result["observed_this_run"] = len(observed)
         # Записываем число отзывов, подтверждённых текущим DOM.
@@ -688,7 +814,14 @@ def collect(page, oid, url, target, limit, scroll_pause):
                     }
                 )
             # Считаем тексты, полученные из встроенного HTML в пределах лимита.
-            html_count = min(embedded["loaded_reviews"], limit)
+            html_count = (
+                # Считаем тексты, полученные из встроенного HTML в пределах лимита.
+                embedded["loaded_reviews"]
+                # Считаем тексты, полученные из встроенного HTML в пределах лимита.
+                if limit is None
+                # Считаем тексты, полученные из встроенного HTML в пределах лимита.
+                else min(embedded["loaded_reviews"], limit)
+            )
             # Записываем число текстов, извлечённых из HTML.
             result["html_full_texts"] = html_count
         # Перехватываем указанную ошибку и сохраняем понятный итог.
@@ -712,10 +845,29 @@ def collect(page, oid, url, target, limit, scroll_pause):
             return result
         # Ждём появления карточек отзывов.
         page.wait_for_selector(CARDS, timeout=20000)
+        # Для больших карточек используем хронологическую выдачу также при полном сборе.
+        declared = result["company"].get("reviews_count")
+        # На небольших карточках все записи можно упорядочить локально без меню.
+        if declared is None or declared > (limit if limit is not None else 50):
+            # Неподтверждённая сортировка не должна давать успешный результат.
+            try:
+                # Меняем порядок через публичное меню страницы.
+                select_newest(page)
+            # Сохраняем уже прочитанные тексты, но не называем их свежей выборкой.
+            except BrowserTimeout as error:
+                # Явно указываем причину незавершённой выборки.
+                result["status"] = "sort_unavailable"
+                # Сохраняем краткую диагностику управления страницей.
+                result["error"] = str(error).splitlines()[0]
+                # Финальный блок сохранит данные и возможное ограничение доступа.
+                return result
+            # Свежесть частичной выборки подтверждена управлением страницы.
+            result["review_order"] = "newest"
+
         # Считаем подряд идущие прокрутки без появления новых отзывов.
         stalls = 0
         # Ограничиваем число проходов чтения и прокрутки.
-        for _ in range(25):
+        while True:
             # Останавливаем обработку, если сайт требует проверку пользователя.
             if challenge(page):
                 # Записываем причину завершения текущего этапа.
@@ -769,7 +921,7 @@ def collect(page, oid, url, target, limit, scroll_pause):
               // Создаём множество ключей текстов, уже сохранённых полностью.
               const known = new Set(fullKeys);
               // Проверяем только карточки в пределах лимита.
-              for (const card of [...document.querySelectorAll('.business-reviews-card-view__review')].slice(0,limit)) {
+              for (const card of [...document.querySelectorAll('.business-reviews-card-view__review')].slice(0,limit ?? undefined)) {
                 // Сопоставляем автора и дату с уже сохранёнными текстами.
                 const identity=JSON.stringify([
                   // Получаем ссылку на автора для сопоставления.
@@ -813,6 +965,8 @@ def collect(page, oid, url, target, limit, scroll_pause):
                 # Удаляем из завершённого снимка записи, которых уже нет в текущем DOM.
                 # Храним отзывы по уникальному ключу; при завершении оставляем подтверждённые в текущем DOM.
                 rows = {key: row for key, row in rows.items() if key in dom_observed}
+                # Сохранённый результат упорядочиваем по датам после подтверждения состава.
+                result["review_order"] = "newest"
                 # Сохраняем отзывы и показатели до следующего действия.
                 checkpoint()
                 # Сопоставляем найденные отзывы со счётчиком сайта или заданным лимитом.
@@ -833,9 +987,11 @@ def collect(page, oid, url, target, limit, scroll_pause):
                 # Заканчиваем текущий цикл после полученного результата.
                 break
             # Сопоставляем найденные отзывы со счётчиком сайта или заданным лимитом.
-            if len(dom_observed) >= limit:
+            if limit is not None and len(dom_observed) >= limit:
                 # Храним отзывы по уникальному ключу; при завершении оставляем подтверждённые в текущем DOM.
                 rows = {key: row for key, row in rows.items() if key in dom_observed}
+                # Сохранённый результат упорядочиваем по датам после подтверждения состава.
+                result["review_order"] = "newest"
                 # Сохраняем отзывы и показатели до следующего действия.
                 checkpoint()
                 # Записываем причину завершения текущего этапа.
@@ -855,8 +1011,8 @@ def collect(page, oid, url, target, limit, scroll_pause):
                 result.update(stopped)
                 # Заканчиваем текущий цикл после полученного результата.
                 break
-            # Запоминаем число карточек перед прокруткой.
-            before = page.locator(CARDS).count()
+            # Запоминаем последний отзыв: виртуализация может сохранять число карточек.
+            before = page.evaluate(TAIL, CARDS)
             # Находим и прокручиваем карточку одним действием: DOM может обновиться.
             # Выполняем чтение или прокрутку непосредственно в текущем DOM.
             page.evaluate(
@@ -866,8 +1022,10 @@ def collect(page, oid, url, target, limit, scroll_pause):
               const last = [...document.querySelectorAll(selector)].at(-1);
               // Если карточек нет, прокрутка не требуется.
               if (!last) return;
-              // Подводим последнюю карточку к нижней границе окна.
-              last.scrollIntoView({block:'end'});
+              // Индикатор подгрузки может находиться ниже последнего отзыва и оставаться вне окна.
+              const loading=[...last.closest('.business-reviews-card-view')?.querySelectorAll('.business-reviews-card-view__skeleton') || []].at(-1);
+              // Подводим индикатор подгрузки либо последнюю карточку к нижней границе окна.
+              (loading || last).scrollIntoView({block:'end'});
               // Поднимаемся по родительским элементам в поиске прокручиваемой панели.
               for (let parent=last.parentElement; parent; parent=parent.parentElement) {
                 // Выбираем панель, содержимое которой действительно можно прокрутить.
@@ -888,10 +1046,12 @@ def collect(page, oid, url, target, limit, scroll_pause):
             page.wait_for_timeout(int(scroll_pause * 1000))
             # Обрабатываем возможную ошибку следующего этапа.
             try:
-                # Ждём увеличения числа отзывов после прокрутки.
+                # Ждём новый последний отзыв вместо роста числа DOM-узлов.
                 page.wait_for_function(
-                    # Задаём HTML-разметку или выражение проверки DOM.
-                    f"document.querySelectorAll({json.dumps(CARDS)}).length > {before}",
+                    # Виртуализированная выдача заменяет старые карточки новыми.
+                    TAIL_CHANGED,
+                    # Передаём прежний последний отзыв без вставки текста в сценарий.
+                    arg={"selector": CARDS, "before": before},
                     # Ограничиваем ожидание в миллисекундах.
                     timeout=10000,
                 )
@@ -907,16 +1067,6 @@ def collect(page, oid, url, target, limit, scroll_pause):
                     result["status"] = "stalled"
                     # Заканчиваем текущий цикл после полученного результата.
                     break
-            # Останавливаем прокрутку после превышения бюджета текущей попытки.
-            if time.monotonic() - started > 240:
-                # Записываем причину завершения текущего этапа.
-                result["status"] = "time_budget"
-                # Заканчиваем текущий цикл после полученного результата.
-                break
-        # Обрабатываем альтернативный исход предыдущей проверки.
-        else:
-            # Записываем причину завершения текущего этапа.
-            result["status"] = "scroll_budget"
     # Перехватываем указанную ошибку и сохраняем понятный итог.
     # Прерывание не считается успешным завершением или пустой карточкой.
     except KeyboardInterrupt:
@@ -1199,12 +1349,14 @@ def main():
     parser.add_argument(
         # Задаём имя параметра командной строки.
         "--limit",
+        # Допускаем общее имя параметра для обоих способов запуска.
+        "--max-reviews",
         # Преобразуем ввод в требуемый тип данных.
         type=int,
         # Задаём значение параметра по умолчанию.
-        default=100,
+        default=None,
         # Показываем назначение параметра в справке запуска.
-        help="Максимум отзывов на организацию: 1–300; по умолчанию 100",
+        help="Максимум самых свежих отзывов на организацию; без параметра собираем все",
     )
     # Добавляем параметр командной строки с описанием.
     parser.add_argument(
@@ -1273,7 +1425,7 @@ def main():
     # Проверяем связанные условия перед продолжением обработки.
     if (
         # Проверяем разрешённый диапазон параметра запуска.
-        not 1 <= args.limit <= 300
+        (args.limit is not None and args.limit < 1)
         # Проверяем разрешённый диапазон параметра запуска.
         or not math.isfinite(args.pause)
         # Межстраничная пауза должна быть конечной и не слишком короткой.
@@ -1288,7 +1440,7 @@ def main():
         # Завершаем запуск с понятным описанием недопустимого параметра.
         parser.error(
             # Показываем допустимые диапазоны всех проверяемых параметров.
-            "Требуется: limit 1–300; pause >= 10; scroll-pause >= 3; 429-retries 0–3"
+            "Требуется: limit >= 1 либо без лимита; pause >= 10; scroll-pause >= 3; 429-retries 0–3"
         )
     # Обрабатываем возможную ошибку следующего этапа.
     try:
@@ -1307,9 +1459,9 @@ def main():
         # Проверяем сохранённый результат каждой организации до запуска браузера.
         for oid, url in urls:
             # Выбираем JSON-файл результатов одной организации.
-            target = args.output / f"{oid}.json"
+            target = review_target(args.output, oid, args.limit)
             # Читаем готовый результат для проверки возможности повторного использования.
-            cached = read_snapshot(target, review_snapshot_valid)
+            cached = load_review_cache(target, oid, args.limit)
             # Используем готовый кэш, если обновление не запрошено.
             if not args.refresh and cache_complete(cached, oid, args.limit):
                 # Выводим краткое событие или результат в терминал.
