@@ -30,6 +30,9 @@ from urllib.parse import urlencode, urljoin
 # Управляем Chromium и распознаём превышение времени ожидания.
 from playwright.sync_api import TimeoutError as BrowserTimeout, sync_playwright
 
+# Проверяем полигональную территорию и подготавливаем её один раз.
+from area_geometry import load_boundary
+
 # Повторно используем сбор отзывов, проверку кэша и сохранение результатов.
 from collect_yandex import (
     # Подключаем проверку достаточности сохранённых отзывов.
@@ -158,7 +161,7 @@ def valid_coordinates(value):
 
 
 # Выбираем организации внутри области и проверяем заданные рубрики.
-def classify_candidate(row, bbox, rubrics):
+def classify_candidate(row, bbox, rubrics, boundary=None):
     # Нормализуем доступные координаты.
     position = valid_coordinates(row.get("coordinates_lon_lat"))
     # Неизвестные координаты обозначаем отдельной причиной исключения.
@@ -173,6 +176,10 @@ def classify_candidate(row, bbox, rubrics):
     if not (west <= lon <= east and south <= lat <= north):
         # Отделяем результаты за пределами области.
         return "outside_bbox"
+    # Проверяем точный контур после дешёвого прямоугольного отбора.
+    if boundary is not None and not boundary.covers(position):
+        # Исключаем отверстия и точки вне выбранного полигона.
+        return "outside_polygon"
     # Для свободного запроса проверка рубрики не задаётся.
     if not rubrics:
         # В этом режиме принимается любая найденная организация внутри области.
@@ -347,7 +354,7 @@ def merge_search_dom(rows, items):
 
 
 # Проверяем поисковый кэш по параметрам и фактическому отбору организаций.
-def search_cache_complete(cached, bbox, selection, max_orgs):
+def search_cache_complete(cached, bbox, selection, max_orgs, boundary=None):
     # Проверяем, что файл содержит объект JSON с совместимыми параметрами.
     if (
         # Проверяем, что файл содержит объект JSON с совместимыми параметрами.
@@ -356,6 +363,8 @@ def search_cache_complete(cached, bbox, selection, max_orgs):
         or cached.get("schema_version") != 1
         # Проверяем, что файл содержит объект JSON с совместимыми параметрами.
         or cached.get("bbox") != bbox
+        # Полигон с тем же прямоугольником не должен получать чужой кэш.
+        or cached.get("geometry") != (boundary.geojson if boundary else None)
         # Проверяем, что файл содержит объект JSON с совместимыми параметрами.
         or cached.get("selection") != selection
         # Проверяем, что файл содержит объект JSON с совместимыми параметрами.
@@ -389,7 +398,7 @@ def search_cache_complete(cached, bbox, selection, max_orgs):
             # Канонический адрес должен указывать на ту же организацию.
             oid, _ = canonical_url(row["url"])
             # География и рубрика проверяются тем же правилом, что при живом поиске.
-            status = classify_candidate(row, bbox, selection["rubrics"])
+            status = classify_candidate(row, bbox, selection["rubrics"], boundary)
         # Неверные типы и отсутствующие поля означают непригодный кэш.
         except (ValueError, KeyError, TypeError, AttributeError):
             # Сохраняем файл, но не используем его автоматически.
@@ -405,7 +414,7 @@ def search_cache_complete(cached, bbox, selection, max_orgs):
 
 
 # Выполняем одно поисковое задание с сохранением найденных организаций.
-def discover(page, bbox, selection, target, max_orgs=20, scroll_pause=5):
+def discover(page, bbox, selection, target, max_orgs=20, scroll_pause=5, boundary=None):
     # Измеряем одну попытку поиска целиком.
     started = time.monotonic()
     # Сохраняем ранее найденные кандидаты при повторе после ограничения доступа.
@@ -418,6 +427,8 @@ def discover(page, bbox, selection, target, max_orgs=20, scroll_pause=5):
         and previous.get("schema_version") == 1
         # Повторно используем только кандидатов того же задания и формата.
         and previous.get("bbox") == bbox
+        # Совместимость включает точный полигон, включая внутренние отверстия.
+        and previous.get("geometry") == (boundary.geojson if boundary else None)
         # Повторно используем только кандидатов того же задания и формата.
         and previous.get("selection") == selection
         # Повторно используем только кандидатов того же задания и формата.
@@ -442,6 +453,8 @@ def discover(page, bbox, selection, target, max_orgs=20, scroll_pause=5):
         "schema_version": 1,
         # Сохраняем границы выбранной области.
         "bbox": bbox,
+        # Сохраняем точный контур отдельно от поискового прямоугольника.
+        "geometry": boundary.geojson if boundary else None,
         # Сохраняем параметры поискового задания.
         "selection": selection,
         # Сохраняем время начала попытки.
@@ -502,7 +515,9 @@ def discover(page, bbox, selection, target, max_orgs=20, scroll_pause=5):
                 # Верхний уровень решает, допустима ли ещё одна попытка.
                 stopped.update(
                     # Верхний уровень решает, допустима ли ещё одна попытка.
-                    status="rate_limited", retry_after=response.headers.get("retry-after")
+                    status="rate_limited",
+                    # Верхний уровень решает, допустима ли ещё одна попытка.
+                    retry_after=response.headers.get("retry-after"),
                 )
             # Отказ в доступе требует остановки.
             elif response.status in {401, 403}:
@@ -526,7 +541,7 @@ def discover(page, bbox, selection, target, max_orgs=20, scroll_pause=5):
                 # Подготавливаем все обнаруженные организации с причинами отбора.
                 row,
                 # Подготавливаем все обнаруженные организации с причинами отбора.
-                selection_status=classify_candidate(row, bbox, selection["rubrics"]),
+                selection_status=classify_candidate(row, bbox, selection["rubrics"], boundary),
                 # Подготавливаем все обнаруженные организации с причинами отбора.
                 seen_in_current_run=row["organization_id"] in observed,
             )
@@ -543,7 +558,7 @@ def discover(page, bbox, selection, target, max_orgs=20, scroll_pause=5):
             for row in candidates
             # В очередь отзывов попадают только подтверждённые организации внутри области.
             if row["selection_status"] == "accepted" and row["seen_in_current_run"]
-        # В очередь отзывов попадают только подтверждённые организации внутри области.
+            # В очередь отзывов попадают только подтверждённые организации внутри области.
         ][:max_orgs]
         # Отдельно учитываем причины исключения без повторной загрузки карточек.
         result["selection_counts"] = {
@@ -566,7 +581,11 @@ def discover(page, bbox, selection, target, max_orgs=20, scroll_pause=5):
         # Открываем обычную страницу поиска с территорией и текстом запроса.
         response = page.goto(
             # Открываем обычную страницу поиска с территорией и текстом запроса.
-            search_url(bbox, selection["query"]), wait_until="domcontentloaded", timeout=45000
+            search_url(bbox, selection["query"]),
+            # Открываем обычную страницу поиска с территорией и текстом запроса.
+            wait_until="domcontentloaded",
+            # Открываем обычную страницу поиска с территорией и текстом запроса.
+            timeout=45000,
         )
         # Сначала проверяем HTTP-ограничение, прежде чем искать карточки.
         if stopped:
@@ -717,7 +736,11 @@ def main():
     # Разрешаем экспорт параметров из карты в отдельный JSON.
     parser.add_argument(
         # Задаём имя параметра командной строки.
-        "--config", type=Path, help="JSON с bbox, categories и необязательным queries"
+        "--config",
+        # Преобразуем имя файла в путь стандартной библиотеки.
+        type=Path,
+        # Показываем назначение этого параметра в справке запуска.
+        help="JSON с bbox, categories и необязательным queries",
     )
     # Разрешаем несколько готовых категорий или их русских названий.
     parser.add_argument(
@@ -753,7 +776,13 @@ def main():
     # Ограничиваем число отобранных организаций на один поисковый запрос.
     parser.add_argument(
         # Задаём имя параметра командной строки.
-        "--max-orgs", type=int, default=20, help="Максимум организаций на категорию: 1–100"
+        "--max-orgs",
+        # Преобразуем заданный объём в целое число.
+        type=int,
+        # По умолчанию выбираем двадцать организаций или двадцать секунд паузы.
+        default=20,
+        # Показываем назначение этого параметра в справке запуска.
+        help="Максимум организаций на категорию: 1–100",
     )
     # Поиск и отзывы используют одну папку проекта с разными подкаталогами.
     parser.add_argument(
@@ -769,22 +798,44 @@ def main():
     # Сбор отзывов включается явно, чтобы поиск можно было проверить отдельно.
     parser.add_argument(
         # Задаём имя параметра командной строки.
-        "--with-reviews", action="store_true", help="Сразу собрать отзывы найденных организаций"
+        "--with-reviews",
+        # Обрабатываем параметр как явное включение режима.
+        action="store_true",
+        # Показываем назначение этого параметра в справке запуска.
+        help="Сразу собрать отзывы найденных организаций",
     )
     # Предел числа отзывов передаётся существующему сборщику.
     parser.add_argument(
         # Задаём имя параметра командной строки.
-        "--review-limit", type=int, default=100, help="Число отзывов на организацию: 1–300"
+        "--review-limit",
+        # Преобразуем заданный объём в целое число.
+        type=int,
+        # По умолчанию собираем до ста отзывов на организацию.
+        default=100,
+        # Показываем назначение этого параметра в справке запуска.
+        help="Число отзывов на организацию: 1–300",
     )
     # Задаём задержку между разными поисковыми заданиями и карточками.
     parser.add_argument(
         # Задаём имя параметра командной строки.
-        "--pause", type=float, default=20, help="Пауза между страницами, секунды; не менее 10"
+        "--pause",
+        # Преобразуем переданные координаты или паузу в числовой вид.
+        type=float,
+        # По умолчанию выбираем двадцать организаций или двадцать секунд паузы.
+        default=20,
+        # Показываем назначение этого параметра в справке запуска.
+        help="Пауза между страницами, секунды; не менее 10",
     )
     # Задаём задержку подгрузки результатов после прокрутки.
     parser.add_argument(
         # Задаём имя параметра командной строки.
-        "--scroll-pause", type=float, default=5, help="Пауза прокрутки, секунды; не менее 3"
+        "--scroll-pause",
+        # Преобразуем переданные координаты или паузу в числовой вид.
+        type=float,
+        # По умолчанию ждём пять секунд после прокрутки.
+        default=5,
+        # Показываем назначение этого параметра в справке запуска.
+        help="Пауза прокрутки, секунды; не менее 3",
     )
     # Ограничиваем число повторов для поисковой выдачи и отзывов.
     parser.add_argument(
@@ -804,7 +855,20 @@ def main():
     # Позволяем обновить готовые снимки поиска и отзывов.
     parser.add_argument(
         # Задаём имя параметра командной строки.
-        "--refresh", action="store_true", help="Повторно загрузить завершённые результаты"
+        "--refresh",
+        # Обрабатываем параметр как явное включение режима.
+        action="store_true",
+        # Показываем назначение этого параметра в справке запуска.
+        help="Повторно загрузить завершённые результаты",
+    )
+    # Принимаем отдельный локальный файл GeoJSON без обращения к геокодеру.
+    parser.add_argument(
+        # Задаём имя параметра командной строки.
+        "--geometry",
+        # Преобразуем имя файла в путь стандартной библиотеки.
+        type=Path,
+        # Показываем назначение этого параметра в справке запуска.
+        help="Локальный Polygon, MultiPolygon или полигональная коллекция GeoJSON",
     )
     # Разбираем переданные параметры.
     args = parser.parse_args()
@@ -818,14 +882,75 @@ def main():
         return
     # Обрабатываем ошибки пользовательского конфига через понятную справку запуска.
     try:
+        # Проверяем размер файлов до чтения координат в память.
+        for input_path in (args.config, args.geometry):
+            # Общий лимит относится и к конфигу с вложенным GeoJSON.
+            if input_path and input_path.stat().st_size > 10 * 1024 * 1024:
+                # Предлагаем разделить область вместо скрытого сокращения геометрии.
+                raise ValueError("Файл территории больше 10 МБ; разделите его на части.")
         # Читаем экспорт карты или используем пустой конфиг.
         config = json.loads(args.config.read_text(encoding="utf-8")) if args.config else {}
-        # Командная строка имеет приоритет над границами из файла.
-        bbox = validate_bbox(args.bbox if args.bbox is not None else config.get("bbox", []))
+        # Проверяем форму настроек до чтения полей.
+        if not isinstance(config, dict):
+            # Настройки должны быть объектом JSON.
+            raise ValueError("Конфиг должен содержать объект JSON.")
+        # Выбираем локальный GeoJSON либо точную геометрию экспортированного конфига.
+        geometry = (
+            # Выбираем локальный GeoJSON либо точную геометрию экспортированного конфига.
+            json.loads(args.geometry.read_text(encoding="utf-8"))
+            # Выбираем локальный GeoJSON либо точную геометрию экспортированного конфига.
+            if args.geometry
+            # Выбираем локальный GeoJSON либо точную геометрию экспортированного конфига.
+            else config.get("geometry")
+        )
+        # Проверяем топологию и подготавливаем пространственный индекс один раз.
+        boundary = load_boundary(geometry) if geometry is not None else None
+        # Для полигона вычисляем рамку по геометрии, не заменяя его прямоугольником.
+        bbox = validate_bbox(
+            # Для полигона вычисляем рамку по геометрии, не заменяя его прямоугольником.
+            boundary.bbox
+            # Для полигона вычисляем рамку по геометрии, не заменяя его прямоугольником.
+            if boundary
+            # Для полигона вычисляем рамку по геометрии, не заменяя его прямоугольником.
+            else args.bbox
+            # Для полигона вычисляем рамку по геометрии, не заменяя его прямоугольником.
+            if args.bbox is not None
+            # Для полигона вычисляем рамку по геометрии, не заменяя его прямоугольником.
+            else config.get("bbox", [])
+        )
+        # Явно переданная рамка должна совпадать с выбранной геометрией.
+        supplied_bbox = (
+            # Явно переданная рамка должна совпадать с выбранной геометрией.
+            args.bbox
+            # Явно переданная рамка должна совпадать с выбранной геометрией.
+            if args.bbox is not None
+            # Явно переданная рамка должна совпадать с выбранной геометрией.
+            else config.get("bbox")
+            # Явно переданная рамка должна совпадать с выбранной геометрией.
+            if not args.geometry
+            # Явно переданная рамка должна совпадать с выбранной геометрией.
+            else None
+        )
+        # Не допускаем скрытого изменения области из-за устаревшей рамки в конфиге.
+        if (
+            # Не допускаем скрытого изменения области из-за устаревшей рамки в конфиге.
+            boundary
+            # Не допускаем скрытого изменения области из-за устаревшей рамки в конфиге.
+            and supplied_bbox is not None
+            # Не допускаем скрытого изменения области из-за устаревшей рамки в конфиге.
+            and any(abs(a - b) > 1e-9 for a, b in zip(validate_bbox(supplied_bbox), bbox))
+        ):
+            # Просим повторно экспортировать согласованные настройки.
+            raise ValueError(
+                # Просим повторно экспортировать согласованные настройки.
+                "bbox не совпадает с границами geometry; экспортируйте конфиг заново."
+            )
         # Объединяем выбранные категории с явно переданными поисковыми выражениями.
         selections = resolve_searches(
             # Объединяем выбранные категории с явно переданными поисковыми выражениями.
-            args.categories or config.get("categories", []), args.query or config.get("queries", [])
+            args.categories or config.get("categories", []),
+            # Объединяем выбранные категории с явно переданными поисковыми выражениями.
+            args.query or config.get("queries", []),
         )
         # Проверяем объёмы, повторы и неотрицательные конечные длительности.
         if not (
@@ -866,17 +991,24 @@ def main():
             # Формируем ключ из границ, запроса, рубрик и заданного объёма.
             json.dumps(
                 # Формируем ключ из границ, запроса, рубрик и заданного объёма.
-                [bbox, selection, args.max_orgs], sort_keys=True, ensure_ascii=False
-            # Формируем ключ из границ, запроса, рубрик и заданного объёма.
+                [bbox, selection, args.max_orgs] + ([boundary.geojson] if boundary else []),
+                # Сохраняем стабильный порядок полей при вычислении ключа поискового кэша.
+                sort_keys=True,
+                # Формируем ключ из границ, запроса, рубрик и заданного объёма.
+                ensure_ascii=False
+                # Формируем ключ из границ, запроса, рубрик и заданного объёма.
             ).encode()
-        # Формируем ключ из границ, запроса, рубрик и заданного объёма.
+            # Формируем ключ из границ, запроса, рубрик и заданного объёма.
         ).hexdigest()[:16]
         # Находим сохранённый поисковый снимок.
         target = search_folder / f"{digest}.json"
         # Читаем JSON, если он уже существует.
         cached = json.loads(target.read_text(encoding="utf-8")) if target.exists() else {}
         # Используем только совместимый и повторно проверенный отбор.
-        ready = not args.refresh and search_cache_complete(cached, bbox, selection, args.max_orgs)
+        ready = not args.refresh and search_cache_complete(
+            # Используем только совместимый и повторно проверенный отбор.
+            cached, bbox, selection, args.max_orgs, boundary
+        )
         # Передаём готовый снимок или отметку о необходимости поиска.
         plans.append((selection, digest, target, cached if ready else None))
     # Проверяем случай, когда для всех категорий уже есть готовые снимки.
@@ -905,7 +1037,9 @@ def main():
                 # Сохраняем общую запись и список категорий обнаружения.
                 merged = cached_organizations.setdefault(
                     # Сохраняем общую запись и список категорий обнаружения.
-                    row["organization_id"], dict(row, found_by=[])
+                    row["organization_id"],
+                    # Сохраняем общую запись и список категорий обнаружения.
+                    dict(row, found_by=[]),
                 )
                 # Добавляем текущую категорию к происхождению записи.
                 merged["found_by"].append(selection["key"])
@@ -918,7 +1052,10 @@ def main():
                 # Используем отдельную папку результатов отзывов.
                 target = args.output / "reviews" / f"{oid}.json"
                 # Читаем предыдущий результат или обозначаем его отсутствие.
-                snapshot = json.loads(target.read_text(encoding="utf-8")) if target.exists() else {}
+                snapshot = (
+                    # Читаем предыдущий результат или обозначаем его отсутствие.
+                    json.loads(target.read_text(encoding="utf-8")) if target.exists() else {}
+                )
                 # Достаточность проверяется правилами существующего сборщика.
                 reviews_ready = reviews_ready and cache_complete(snapshot, oid, args.review_limit)
         # Если новые обращения не нужны, браузер вообще не запускается.
@@ -932,6 +1069,8 @@ def main():
                     "schema_version": 1,
                     # Сохраняем границы выбранной области.
                     "bbox": bbox,
+                    # Сохраняем точный контур отдельно от поискового прямоугольника.
+                    "geometry": boundary.geojson if boundary else None,
                     # Сохраняем явное ограничение охвата видимой выдачей.
                     "coverage": "visible_search_results_only",
                     # Сохраняем сведения о выполненных поисковых заданиях.
@@ -943,7 +1082,10 @@ def main():
             # При запросе отзывов также фиксируем отсутствие новых карточек.
             if args.with_reviews:
                 # Готовые отзывы остаются в существующих файлах организаций.
-                save_result(args.output / "review_jobs.json", {"outcomes": [], "requested_jobs": 0})
+                save_result(
+                    # Готовые отзывы остаются в существующих файлах организаций.
+                    args.output / "review_jobs.json", {"outcomes": [], "requested_jobs": 0}
+                )
             # Сообщаем об использовании кэша без скрытого открытия сайта.
             print(
                 # Сообщаем об использовании кэша без скрытого открытия сайта.
@@ -972,13 +1114,20 @@ def main():
             # Создаём временную вкладку для чтения фактической версии браузера.
             probe = browser.new_page()
             # Используем обозначение Chrome с установленной версией Chromium.
-            user_agent = probe.evaluate("navigator.userAgent").replace("HeadlessChrome/", "Chrome/")
+            user_agent = probe.evaluate("navigator.userAgent").replace(
+                # Используем обозначение Chrome с установленной версией Chromium.
+                "HeadlessChrome/", "Chrome/"
+            )
             # Закрываем временную вкладку.
             probe.close()
             # Общая сессия сохраняет cookies между поиском и отзывами.
             context = browser.new_context(
                 # Общая сессия сохраняет cookies между поиском и отзывами.
-                locale="ru-RU", viewport={"width": 1366, "height": 900}, user_agent=user_agent
+                locale="ru-RU",
+                # Задаём окно, в котором панель поиска удобно прокручивать.
+                viewport={"width": 1366, "height": 900},
+                # Передаём обозначение Chrome с фактической версией установленного браузера.
+                user_agent=user_agent,
             )
             # Обрабатываем все задания в одной вкладке.
             page = context.new_page()
@@ -1003,7 +1152,19 @@ def main():
                         # Выполняем поиск и сохраняем кандидатов текущей попытки.
                         result = discover(
                             # Выполняем поиск и сохраняем кандидатов текущей попытки.
-                            page, bbox, selection, target, args.max_orgs, args.scroll_pause
+                            page,
+                            # Выполняем поиск и сохраняем кандидатов текущей попытки.
+                            bbox,
+                            # Выполняем поиск и сохраняем кандидатов текущей попытки.
+                            selection,
+                            # Выполняем поиск и сохраняем кандидатов текущей попытки.
+                            target,
+                            # Выполняем поиск и сохраняем кандидатов текущей попытки.
+                            args.max_orgs,
+                            # Выполняем поиск и сохраняем кандидатов текущей попытки.
+                            args.scroll_pause,
+                            # Выполняем поиск и сохраняем кандидатов текущей попытки.
+                            boundary,
                         )
                         # При другом исходе или последнем повторе заканчиваем попытки.
                         if result["status"] != "rate_limited" or retry == args.rate_retries:
@@ -1035,7 +1196,9 @@ def main():
                     # Получаем уже найденную организацию или создаём её запись.
                     merged = organizations.setdefault(
                         # Получаем уже найденную организацию или создаём её запись.
-                        row["organization_id"], dict(row, found_by=[])
+                        row["organization_id"],
+                        # Получаем уже найденную организацию или создаём её запись.
+                        dict(row, found_by=[]),
                     )
                     # Отмечаем все категории, по которым обнаружена эта организация.
                     merged["found_by"].append(selection["key"])
@@ -1048,6 +1211,8 @@ def main():
                         "schema_version": 1,
                         # Сохраняем границы выбранной области.
                         "bbox": bbox,
+                        # Сохраняем точный контур отдельно от поискового прямоугольника.
+                        "geometry": boundary.geojson if boundary else None,
                         # Сохраняем явное ограничение охвата видимой выдачей.
                         "coverage": "visible_search_results_only",
                         # Сохраняем сведения о выполненных поисковых заданиях.
@@ -1084,7 +1249,11 @@ def main():
                     # Читаем предыдущий снимок отзывов, если он существует.
                     cached = (
                         # Читаем предыдущий снимок отзывов, если он существует.
-                        json.loads(target.read_text(encoding="utf-8")) if target.exists() else {}
+                        json.loads(target.read_text(encoding="utf-8"))
+                        # Читаем JSON только при наличии сохранённого файла.
+                        if target.exists()
+                        # Если файла нет, начинаем без сохранённого результата.
+                        else {}
                     )
                     # Обновление или недостаточный кэш требует открытия карточки.
                     if args.refresh or not cache_complete(cached, oid, args.review_limit):

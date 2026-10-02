@@ -35,6 +35,12 @@
     button:disabled { background: #a7b6c5; cursor: default; }
     /* Делаем поля настроек удобными для ввода. */
     input[type=text], textarea { box-sizing: border-box; width: 100%; padding: 10px; border: 1px solid #cbd5df; border-radius: 6px; font: inherit; }
+    /* Имя выбранного файла не расширяет панель на телефоне. */
+    input[type=file] { max-width: 100%; }
+    /* Разделяем кнопки рисования и результаты выбора города. */
+    .actions, #city-results { display: flex; flex-wrap: wrap; gap: 8px; margin: 10px 0; }
+    /* Показываем архивную дату рядом с выбранным контуром. */
+    #area-info { font-size: 13px; color: #52677d; }
     /* Ограничиваем высоту списка, сохраняя доступ ко всем категориям. */
     #categories { max-height: 240px; overflow-y: auto; border: 1px solid #e0e7ef; border-radius: 8px; padding: 8px; }
     /* Размещаем каждую категорию с отдельным флажком. */
@@ -60,8 +66,31 @@
       <p>Выберите участок на карте и категории организаций. Карта использует подложку OSM; организации и отзывы будут найдены на Яндекс Картах.</p>
       <!-- Предлагаем выделить прямоугольник вместо ручного ввода координат. -->
       <h2>1. Область поиска</h2>
-      <!-- Перезапуск выделения заменяет прежний прямоугольник. -->
-      <button id="draw" type="button">Выделить прямоугольник</button>
+      <!-- Каждый способ выбора заменяет прежнюю территорию после успешной проверки. -->
+      <div class="actions">
+        <!-- Сохраняем прежний способ прямоугольного выбора. -->
+        <button id="draw" type="button">Выделить прямоугольник</button>
+        <!-- Позволяем обвести участок произвольной формы. -->
+        <button id="draw-polygon" type="button">Нарисовать полигон</button>
+      </div>
+      <!-- Объясняем завершение рисования произвольной области. -->
+      <p>Для полигона последовательно отметьте вершины и нажмите первую точку для завершения. Esc отменяет рисование.</p>
+      <!-- Загружаем пользовательскую границу с локального диска. -->
+      <label for="geojson-file">Загрузить границу GeoJSON</label>
+      <!-- Ограничение формата не заменяет проверку содержимого файла. -->
+      <input id="geojson-file" type="file" accept=".geojson,.json,application/geo+json,application/json">
+      <!-- Обозначаем поддержку сложных территорий и порядок координат. -->
+      <p>Polygon, MultiPolygon или коллекция полигонов; WGS84, долгота и широта. До 10 МБ.</p>
+      <!-- Ищем название в локальном каталоге, без внешнего геокодера. -->
+      <label for="city-search">Город из локального каталога</label>
+      <!-- Поле фильтрует названия и сохранённые варианты написания. -->
+      <input id="city-search" type="text" placeholder="Москва или Санкт-Петербург" autocomplete="off">
+      <!-- Показываем варианты явно, не выбирая первый результат автоматически. -->
+      <div id="city-results" aria-label="Результаты поиска города"></div>
+      <!-- Архивный снимок нельзя представлять как актуальную границу. -->
+      <p>В комплекте — Москва и Санкт-Петербург, снимки OSM за 2016 год. Проверьте актуальность или загрузите свою границу.</p>
+      <!-- Источник и дата относятся к выбранной геометрии. -->
+      <p id="area-info">Территория пока не выбрана.</p>
       <!-- Показываем проверяемый порядок границ. -->
       <p>Приблизьте нужный участок, нажмите кнопку и протяните прямоугольник. Границы: запад, юг, восток, север.</p>
       <!-- Координаты нельзя случайно изменить отдельно от выбранного прямоугольника. -->
@@ -89,119 +118,14 @@
       <!-- Выводим сообщения о выборе и ошибках прямо в панели. -->
       <p id="status" role="status">Выберите территорию на карте.</p>
     </aside>
-    <!-- Карта используется только для выбора прямоугольника. -->
+    <!-- Карта показывает выбранный прямоугольник либо полигональную территорию. -->
     <div id="map" aria-label="Карта выбора территории"></div>
   </main>
   <!-- Загружаем библиотеку отображения карты. -->
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
   <!-- Загружаем готовый инструмент рисования прямоугольника. -->
   <script src="https://unpkg.com/leaflet-draw@1.0.4/dist/leaflet.draw.js"></script>
-  <!-- Настраиваем выбор территории и экспорт JSON в браузере. -->
-  <script>
-    // Показываем начальный участок Томска; карту можно перемещать и масштабировать.
-    const map = L.map('map').setView([56.47, 84.985], 13);
-    // Загружаем обычные изображения подложки с обязательным указанием источника.
-    L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {maxZoom: 19, attribution: '© <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>'}).addTo(map);
-    // Создаём слой только для выбранного прямоугольника.
-    const area = L.featureGroup().addTo(map);
-    // Храним границы без округления значений в экспортируемом файле.
-    let bbox = null;
-    // Подготавливаем элемент сообщений.
-    const status = document.getElementById('status');
-    // Подготавливаем кнопку сохранения.
-    const exportButton = document.getElementById('export');
-    // Читаем ключи выбранных категорий из флажков.
-    const selectedCategories = () => [...document.querySelectorAll('#categories input:checked')].map(input => input.value);
-    // Читаем отдельные свободные запросы и удаляем пустые строки.
-    const selectedQueries = () => document.getElementById('queries').value.split('\n').map(value => value.trim()).filter(Boolean);
-    // Обновляем доступность экспорта после любого изменения выбора.
-    const update = () => { exportButton.disabled = !bbox || (!selectedCategories().length && !selectedQueries().length); };
-    // Переводим подсказку готового инструмента рисования на русский.
-    L.drawLocal.draw.handlers.rectangle.tooltip.start = 'Нажмите и протяните прямоугольник.';
-    // Показываем понятную подсказку завершения рисования.
-    L.drawLocal.draw.handlers.simpleshape.tooltip.end = 'Отпустите кнопку мыши для завершения.';
-    // Создаём один обработчик рисования, чтобы повторное нажатие не дублировало события.
-    const drawer = new L.Draw.Rectangle(map);
-    // Включаем готовый инструмент выделения по кнопке.
-    document.getElementById('draw').addEventListener('click', () => drawer.enable());
-    // Новый прямоугольник заменяет прежний выбор.
-    map.on('draw:created', event => {
-      // Удаляем предыдущую геометрию выделения.
-      area.clearLayers();
-      // Добавляем выбранный прямоугольник на карту.
-      area.addLayer(event.layer);
-      // Получаем точные границы из геометрии.
-      const bounds = event.layer.getBounds();
-      // Записываем координаты в порядке, принимаемом модулем поиска.
-      bbox = [bounds.getWest(), bounds.getSouth(), bounds.getEast(), bounds.getNorth()];
-      // Округляем только отображение, сохраняя точные значения для JSON.
-      document.getElementById('bounds').value = bbox.map(value => value.toFixed(6)).join(', ');
-      // Подтверждаем выбор территории.
-      status.textContent = 'Территория выбрана. Выберите категории и сохраните параметры.';
-      // Проверяем готовность к экспорту.
-      update();
-    });
-    // Следим за изменением выбранных категорий.
-    document.getElementById('categories').addEventListener('change', update);
-    // Следим за изменением собственных поисковых выражений.
-    document.getElementById('queries').addEventListener('input', update);
-    // Сохраняем только параметры выбора, не запуская сетевой сбор.
-    exportButton.addEventListener('click', () => {
-      // Формируем конфиг, совместимый с параметром --config.
-      const config = {bbox, categories: selectedCategories(), queries: selectedQueries()};
-      // Создаём локальный файл UTF-8 средствами браузера.
-      const blob = new Blob([JSON.stringify(config, null, 2)], {type: 'application/json;charset=utf-8'});
-      // Создаём временную ссылку на файл в памяти.
-      const url = URL.createObjectURL(blob);
-      // Подготавливаем обычную загрузку файла.
-      const link = document.createElement('a');
-      // Передаём ссылку на сформированный JSON.
-      link.href = url;
-      // Задаём имя экспортируемого конфига.
-      link.download = 'area.json';
-      // Запускаем сохранение по явному нажатию пользователя.
-      link.click();
-      // Освобождаем временную ссылку после начала загрузки.
-      setTimeout(() => URL.revokeObjectURL(url), 1000);
-      // Напоминаем, куда передать конфиг.
-      status.textContent = 'area.json сохранён. Поместите его в папку репозитория и выполните команду.';
-    });
-    // Загружаем общий справочник из локальной папки через обычный статический сервер.
-    fetch('categories.json').then(response => {
-      // Отличаем отсутствие файла от корректного JSON.
-      if (!response.ok) throw new Error('Не удалось прочитать categories.json');
-      // Разбираем локальный JSON средствами браузера.
-      return response.json();
-    }).then(catalog => {
-      // Находим контейнер списка категорий.
-      const container = document.getElementById('categories');
-      // Удаляем временную надпись о загрузке.
-      container.textContent = '';
-      // Создаём флажок для каждой предустановки.
-      for (const [key, item] of Object.entries(catalog.categories)) {
-        // Объединяем флажок и название в доступную для нажатия подпись.
-        const label = document.createElement('label');
-        // Применяем единое оформление строки.
-        label.className = 'category';
-        // Создаём флажок выбора.
-        const input = document.createElement('input');
-        // Разрешаем выбрать несколько категорий одновременно.
-        input.type = 'checkbox';
-        // Ключ совпадает с ключом Python-справочника.
-        input.value = key;
-        // По умолчанию выбираем одну понятную категорию.
-        input.checked = key === 'cafe';
-        // Добавляем текст без исполнения HTML из файла категорий.
-        label.append(input, document.createTextNode(item.label));
-        // Показываем категорию в общей панели.
-        container.append(label);
-      }
-      // Учитываем загруженные флажки при готовности экспорта.
-      update();
-    }).catch(error => {
-      // Объясняем необходимость запуска локального статического сервера.
-      status.textContent = error.message + '. Откройте страницу через локальный сервер по инструкции README.';
-    });
-  </script>
+  <!-- Загружаем выбор геометрии, локальный каталог и экспорт настроек. -->
+  <script src="area_selection.js"></script>
 </body>
 </html>
