@@ -46,7 +46,7 @@ document.getElementById('draw').addEventListener('click', () => { selectionVersi
 document.getElementById('draw-polygon').addEventListener('click', () => { selectionVersion++; stopDrawing(); polygonDrawer.enable(); });
 
 // Проверяем структуру загружаемого GeoJSON до изменения текущего выбора.
-function checkGeoJSON(value) {
+function checkGeoJSON(value, budget = {vertices: 0}) {
   // Требуем объект с явно указанным типом.
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('Граница должна быть объектом GeoJSON.');
   // Не угадываем проекцию чужого файла.
@@ -56,20 +56,18 @@ function checkGeoJSON(value) {
     // Пустая коллекция не является территорией.
     if (!Array.isArray(value.features) || !value.features.length) throw new Error('В коллекции нет полигонов.');
     // Проверяем каждую часть территории теми же правилами.
-    value.features.forEach(checkGeoJSON);
+    value.features.forEach(feature => checkGeoJSON(feature, budget));
     // Возвращаем исходные координаты без упрощения.
     return value;
   }
   // Свойства объекта не участвуют в отборе организаций.
-  if (value.type === 'Feature') return checkGeoJSON(value.geometry);
+  if (value.type === 'Feature') return checkGeoJSON(value.geometry, budget);
   // Поддерживаем только площади.
   if (!['Polygon', 'MultiPolygon'].includes(value.type)) throw new Error('Допустимы только Polygon и MultiPolygon.');
   // Приводим контуры к одному виду для предварительной проверки.
   const polygons = value.type === 'Polygon' ? [value.coordinates] : value.coordinates;
   // Проверяем наличие хотя бы одного полигона.
   if (!Array.isArray(polygons) || !polygons.length) throw new Error('В границе нет координат.');
-  // Подсчитываем исходные вершины без сокращения точности.
-  let vertices = 0;
   // Проверяем внешние контуры и отверстия.
   for (const polygon of polygons) {
     // Требуем внешний контур каждой части.
@@ -78,10 +76,10 @@ function checkGeoJSON(value) {
     for (const ring of polygon) {
       // Нельзя молча замыкать ошибочный файл.
       if (!Array.isArray(ring) || ring.length < 4 || JSON.stringify(ring[0]) !== JSON.stringify(ring.at(-1))) throw new Error('Контур должен быть замкнут и иметь не менее четырёх координат.');
-      // Ограничиваем размер импорта.
-      vertices += ring.length;
+      // Считаем вершины всех объектов импортируемой границы без сокращения точности.
+      budget.vertices += ring.length;
       // Большой файл нужно предварительно разделить, а не упрощать автоматически.
-      if (vertices > 200000) throw new Error('Допускается до 200 000 вершин в одной геометрии.');
+      if (budget.vertices > 200000) throw new Error('Допускается до 200 000 вершин во всей границе.');
       // Проверяем двумерный порядок долгота, широта.
       for (const point of ring) {
         // Исключаем строки, бесконечность и координаты в метрах.

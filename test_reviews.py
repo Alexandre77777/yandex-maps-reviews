@@ -106,12 +106,12 @@ def example_html(count=2, declared=5):
         # Задаём HTML-разметку или выражение проверки DOM.
         f'<div class="business-review-view__body"><span class="spoiler-view__text _collapsed">'
         # Задаём HTML-разметку или выражение проверки DOM.
-        f'<span class="spoiler-view__text-container">Короткий текст {i}</span></span></div></div>'
+        f'<span class="spoiler-view__text-container">Полный текст отзыва {i}.</span></span></div></div>'
         # Последовательно обрабатываем записи указанного набора.
         for i in range(count)
     )
     # Сообщаем, что условие готовности или наличия проверки не выполнено.
-    return f'<script class="state-view" type="application/json">{json.dumps(state, ensure_ascii=False)}</script>{cards}'
+    return f'<script class="state-view" type="application/json">{json.dumps(state, ensure_ascii=False)}</script><div class="business-reviews-card-view__title">Отзывы {declared}</div>{cards}'
 
 
 # Подменяем сетевые действия браузера заранее заданными ответами.
@@ -156,6 +156,8 @@ def fake_page(html, batch, status=200):
         ),
         # Подменяем действие браузера без обращения к внешней сети.
         wait_for_selector=lambda *args, **kwargs: None,
+        # Контролируемые сценарии не ждут реальные браузерные паузы.
+        wait_for_timeout=lambda milliseconds: None,
         # Подтверждаем проверочные даты уже выбранной сортировки.
         wait_for_function=lambda *args, **kwargs: None,
         # Возвращаем вымышленный HTML для проверки извлечения.
@@ -276,7 +278,20 @@ class ReviewTests(unittest.TestCase):
             # Выбираем JSON-файл результатов одной организации.
             target = Path(directory) / "result.json"
             # Подготавливаем результат обработки и показатели полноты.
-            result = collect(fake_page(example_html(0, 0), {}), OID, URL, target, 2, 5)
+            result = collect(
+                # Подготавливаем результат обработки и показатели полноты.
+                fake_page(example_html(0, 0), {"company": {"reviews_count": 0}, "reviews": []}),
+                # Подготавливаем результат обработки и показатели полноты.
+                OID,
+                # Подготавливаем результат обработки и показатели полноты.
+                URL,
+                # Подготавливаем результат обработки и показатели полноты.
+                target,
+                # Подготавливаем результат обработки и показатели полноты.
+                2,
+                # Передаём допустимую паузу или небольшой объём автономной проверки.
+                5,
+            )
             # Проверяем состояние обработки.
             self.assertEqual(result["status"], "complete")
             # Проверяем ожидаемое поведение обработчика.

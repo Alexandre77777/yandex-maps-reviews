@@ -19,7 +19,11 @@ from shapely.ops import unary_union
 from shapely.validation import explain_validity
 
 
-# Храним проверенную геометрию и её подготовленный пространственный индекс.
+# Ограничиваем суммарное число вершин до создания геометрии GEOS.
+MAX_BOUNDARY_VERTICES = 200_000
+
+
+# Храним проверенную границу для многократной проверки координат организаций.
 class Boundary:
     # Подготавливаем одну территорию перед обходом организаций.
     def __init__(self, geometry):
@@ -45,7 +49,11 @@ def load_boundary(value):
 
 
 # Проверяем вложенные геометрии без лишней сериализации промежуточных частей.
-def _read_geometry(value):
+def _read_geometry(value, vertices=None):
+    # Ограничение относится ко всему файлу, включая все объекты коллекции.
+    if vertices is None:
+        # Передаём один счётчик во все вложенные геометрии.
+        vertices = [0]
     # Разбираем только объекты GeoJSON.
     if not isinstance(value, dict):
         # Не допускаем подмену геометрии массивом или строкой.
@@ -65,13 +73,13 @@ def _read_geometry(value):
             # Требуем хотя бы один полигональный объект.
             raise ValueError("FeatureCollection должна содержать полигональные объекты.")
         # Проверяем каждый Feature отдельно, включая его систему координат.
-        parts = [_read_geometry(feature) for feature in features]
+        parts = [_read_geometry(feature, vertices) for feature in features]
         # Объединяем соприкасающиеся и перекрывающиеся части вместо некорректного MultiPolygon.
         return unary_union(parts)
     # Свойства Feature не влияют на пространственный отбор.
     if kind == "Feature":
         # Проверяем вложенную геометрию по тем же правилам.
-        return _read_geometry(value.get("geometry"))
+        return _read_geometry(value.get("geometry"), vertices)
     # Ограничиваем ввод площадными территориями.
     if kind not in {"Polygon", "MultiPolygon"}:
         # Точка или линия не заменяет площадь поиска.
@@ -83,7 +91,6 @@ def _read_geometry(value):
         # Не передаём пустую геометрию библиотеке.
         raise ValueError("В границе отсутствуют координаты.")
     # Учитываем размер входа до построения пространственного индекса.
-    vertices = 0
     # Проверяем внешний контур и отверстия каждого полигона.
     for polygon in polygons:
         # Каждый полигон должен иметь внешний контур.
@@ -100,11 +107,11 @@ def _read_geometry(value):
                     "Контур должен быть замкнут и содержать не менее четырёх координат."
                 )
             # Подсчитываем вершины исходного файла.
-            vertices += len(ring)
+            vertices[0] += len(ring)
             # Ограничиваем размер ручного импорта, а не точность геометрии.
-            if vertices > 200_000:
+            if vertices[0] > MAX_BOUNDARY_VERTICES:
                 # Предлагаем разделить чрезмерно большой файл.
-                raise ValueError("В одной геометрии допускается до 200 000 вершин.")
+                raise ValueError("Во всей границе допускается до 200 000 вершин.")
             # Проверяем порядок и диапазоны каждой точки.
             for point in ring:
                 # Поддерживаем только двумерные координаты WGS84.
