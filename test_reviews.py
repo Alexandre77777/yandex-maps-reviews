@@ -3,6 +3,9 @@
 # Подключаем чтение и запись JSON.
 import json
 
+# Разбираем вымышленный HTML для проверки анонимных отзывов.
+import re
+
 # Подключаем чтение переменных окружения.
 import os
 
@@ -368,9 +371,17 @@ class ReviewTests(unittest.TestCase):
         # При отсутствии автора пробелы по краям не должны создавать два ключа.
         anonymous = {"date": "2026-09-01", "text": "Полный текст\n"}
         # Проверяем объединение HTML и DOM анонимного отзыва.
-        self.assertEqual(review_key(OID, anonymous), review_key(OID, dict(anonymous, text="Полный текст")))
+        self.assertEqual(
+            # Проверяем объединение HTML и DOM анонимного отзыва.
+            review_key(OID, anonymous), review_key(OID, dict(anonymous, text="Полный текст"))
+        )
         # Надпись «Анонимный отзыв» в DOM должна соответствовать отсутствующему имени в HTML.
-        self.assertEqual(review_key(OID, anonymous), review_key(OID, dict(anonymous, author="Анонимный отзыв", text="Полный текст")))
+        self.assertEqual(
+            # Надпись «Анонимный отзыв» в DOM должна соответствовать отсутствующему имени в HTML.
+            review_key(OID, anonymous),
+            # Надпись «Анонимный отзыв» в DOM должна соответствовать отсутствующему имени в HTML.
+            review_key(OID, dict(anonymous, author="Анонимный отзыв", text="Полный текст")),
+        )
         # Получаем отдельный отзыв для проверки его полей.
         row = {
             # Сохраняем публичную ссылку на профиль автора.
@@ -408,6 +419,76 @@ class ReviewTests(unittest.TestCase):
         self.assertEqual(retry_seconds("bad"), 0)
         # Проверяем ожидаемое поведение обработчика.
         self.assertEqual(extract(example_html(), OID)["loaded_reviews"], 2)
+
+    # Анонимные отзывы за одну дату должны раскрываться и сохраняться раздельно.
+    def test_anonymous_short_full_and_expansion(self):
+        # Создаём два отзыва с одной датой и разными текстами.
+        html = example_html(2, 2)
+        # Читаем вымышленное встроенное состояние.
+        state = json.loads(re.search(r"<script[^>]*>(.*?)</script>", html, re.S)[1])
+        # Оставляем в HTML только первый полный текст, второй доступен только после раскрытия DOM.
+        reviews = state["stack"][0]["results"]["items"][0]["reviewResults"]["reviews"]
+        # Первый отзыв не имеет публичного профиля или имени.
+        reviews[0]["author"] = {}
+        # Второй отзыв отсутствует в первой встроенной порции.
+        del reviews[1:]
+        # Сохраняем карточки DOM отдельно от нового состояния.
+        cards = html.split("</script>", 1)[1]
+        # Убираем публичные ссылки обоих анонимных авторов.
+        cards = re.sub(r'<a class="business-review-view__link"[^>]*></a>', "", cards)
+        # Отображение анонимного автора не должно создать второй ключ того же текста.
+        cards = cards.replace("Автор 0", "Анонимный отзыв").replace("Автор 1", "Анонимный отзыв")
+        # Короткие тексты должны быть префиксами их полных версий.
+        cards = cards.replace("Короткий текст 0", "Полный текст отзыва 0.").replace(
+            # Короткие тексты должны быть префиксами их полных версий.
+            "Короткий текст 1", "Полный текст отзыва 1."
+        )
+        # Формируем первую порцию HTML и два свёрнутых DOM-отзыва.
+        html = (
+            # Формируем первую порцию HTML и два свёрнутых DOM-отзыва.
+            '<script class="state-view" type="application/json">'
+            # Формируем первую порцию HTML и два свёрнутых DOM-отзыва.
+            + json.dumps(state)
+            # Формируем первую порцию HTML и два свёрнутых DOM-отзыва.
+            + "</script>"
+            # Формируем первую порцию HTML и два свёрнутых DOM-отзыва.
+            + cards
+        )
+        # Создаём отдельную страницу для управляемых обработчиков раскрытия.
+        page = self.browser.new_page()
+        # Любые сетевые обращения в автономной проверке запрещены.
+        page.route("**/*", lambda route: route.abort())
+        # Освобождаем страницу при любом исходе проверки.
+        try:
+            # Загружаем только вымышленную разметку.
+            page.set_content(html)
+            # Добавляем управляемые кнопки раскрытия, повторяющие изменение DOM страницы.
+            page.evaluate(
+                # Добавляем управляемые кнопки раскрытия, повторяющие изменение DOM страницы.
+                "() => document.querySelectorAll('.business-reviews-card-view__review').forEach((card,i) => {const button=document.createElement('button');button.className='business-review-view__expand';button.textContent='Читать дальше';button.addEventListener('click',()=>{card.querySelector('.spoiler-view__text-container').textContent='Полный текст отзыва '+i+'. Продолжение.';card.querySelector('.spoiler-view__text').classList.remove('_collapsed');});card.append(button);})"
+            )
+            # Имитируем только открытие публичной страницы, сохраняя реальное чтение и раскрытие DOM.
+            proxy = fake_page(html, {})
+            # Все браузерные выражения выполняются над этой страницей.
+            proxy.evaluate = page.evaluate
+            # Раскрытие синхронное, поэтому дополнительное ожидание не требуется.
+            proxy.wait_for_timeout = lambda *args: None
+            # Изолируем сохранённый результат.
+            with TemporaryDirectory() as folder:
+                # Выполняем настоящий сбор и объединение HTML с DOM.
+                result = collect(proxy, OID, URL, Path(folder) / "result.json", 2, 0)
+            # Полные два отзыва не должны превратиться в дубликаты коротких версий.
+            self.assertEqual(result["status"], "complete")
+            # У каждого текста сохраняется отдельный ключ.
+            self.assertEqual(len(result["reviews"]), 2)
+            # Оба текста полные и оценки индивидуальные.
+            self.assertEqual(result["valid_reviews"], 2)
+            # Второй анонимный отзыв за ту же дату действительно раскрыт.
+            self.assertTrue(all("Продолжение." in row["text"] for row in result["reviews"]))
+        # Закрываем только страницу этого автономного сценария.
+        finally:
+            # Общий браузер класса остаётся доступен другим проверкам.
+            page.close()
 
 
 # Выполняем запуск только при прямом вызове файла.

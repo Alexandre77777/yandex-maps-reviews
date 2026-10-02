@@ -13,3 +13,7 @@ area.json
 .vscode/
 .DS_Store
 Thumbs.db
+
+# Исключаем служебные замки и незавершённые атомарные записи.
+.run.lock
+*.json.*.tmp
