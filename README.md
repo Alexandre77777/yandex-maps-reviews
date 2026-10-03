@@ -19,7 +19,7 @@ git clone https://github.com/Alexandre77777/yandex-maps-reviews.git
 cd yandex-maps-reviews
 ```
 
-До публикации репозитория используйте локальную копию или распакованный ZIP и откройте терминал в его папке. Рекомендуется отдельное окружение:
+Рекомендуется отдельное окружение:
 
 ```bash
 # Создаём отдельное окружение.
@@ -48,7 +48,7 @@ Pip установит недостающие библиотеки и приве
 %pip install /content/yandex-maps-reviews
 ```
 
-Далее выполняйте примеры Python ниже. В Colab сборщик автоматически подготавливает Chromium вместе с системными библиотеками Linux. GPU не нужен. Готовый пример — [ноутбук для Colab](examples/colab_quickstart.ipynb).
+Далее выполняйте примеры Python ниже. В Colab сборщик автоматически подготавливает Chromium вместе с системными библиотеками Linux. GPU не нужен. Готовый пример — [открыть в Colab](https://colab.research.google.com/github/Alexandre77777/yandex-maps-reviews/blob/main/examples/colab_quickstart.ipynb) или [посмотреть файл ноутбука](examples/colab_quickstart.ipynb).
 
 ## 🐍 Собрать организации и отзывы
 
