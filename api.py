@@ -28,7 +28,7 @@ from pathlib import Path
 import pandas as pd
 
 # Используем существующие проверку JSON и блокировку папки.
-from .storage import output_lock, read_snapshot
+from .storage import output_lock, read_snapshot, save_result
 
 # Справочники устанавливаются рядом с этим модулем.
 ROOT = Path(__file__).resolve().parent
@@ -136,14 +136,16 @@ class CollectionResult:
             raise ImportError(
                 # Сохраняем исходную причину ошибки импорта.
                 'Установите пространственные зависимости: pip install ".[geo]"'
-            # Сохраняем исходную причину ошибки импорта.
+                # Сохраняем исходную причину ошибки импорта.
             ) from error
         # Пропущенные координаты должны давать отсутствующую геометрию, а не Point NaN.
         valid = self.organizations[["longitude", "latitude"]].notna().all(axis=1)
         # Создаём точки только для строк с обеими координатами.
         points = gpd.points_from_xy(
             # Создаём точки только для строк с обеими координатами.
-            self.organizations.loc[valid, "longitude"], self.organizations.loc[valid, "latitude"]
+            self.organizations.loc[valid, "longitude"],
+            # Создаём точки только для строк с обеими координатами.
+            self.organizations.loc[valid, "latitude"],
         )
         # Сохраняем исходный индекс, чтобы точки не сместились относительно организаций.
         geometry = gpd.GeoSeries(None, index=self.organizations.index, crs="EPSG:4326")
@@ -151,6 +153,104 @@ class CollectionResult:
         geometry.loc[valid] = points
         # Возвращаем отдельную таблицу в системе координат WGS84.
         return gpd.GeoDataFrame(self.organizations.copy(), geometry=geometry, crs="EPSG:4326")
+
+    # Группируем отзывы по организациям в обычный объект GeoJSON без GeoPandas.
+    def to_geojson(self, *, confirmed_only=False):
+        # Фильтрация должна быть явной, чтобы строка "False" не скрыла часть отзывов.
+        if not isinstance(confirmed_only, bool):
+            # Отклоняем неподходящий тип до построения или записи результата.
+            raise ValueError("confirmed_only должен быть True или False.")
+        # По умолчанию сохраняем также прежние неподтверждённые записи.
+        selected = self.reviews.loc[self.reviews["confirmed"]] if confirmed_only else self.reviews
+        # Собираем группы одним проходом вместо повторной фильтрации для каждой организации.
+        grouped = {}
+        # Превращаем все виды пропусков Pandas в JSON null, включая отсутствующие столбцы автора.
+        review_records = (
+            # Превращаем все виды пропусков Pandas в JSON null, включая отсутствующие столбцы автора.
+            selected.astype(object).where(selected.notna(), None).to_dict(orient="records")
+        )
+        # Преобразуем числовые и логические типы Pandas в обычные значения Python.
+        for review in review_records:
+            # Дата становится строкой ISO 8601; исходная строка остаётся в date_raw.
+            review["date"] = None if pd.isna(review["date"]) else review["date"].isoformat()
+            # Ключ связи хранится у родительского объекта, а не повторяется в каждом отзыве.
+            oid = review.pop("organization_id")
+            # Сохраняем порядок, текст, звёзды и признаки подтверждения отзыва.
+            grouped.setdefault(oid, []).append(review)
+        # Создаём отдельный Feature для каждой организации, даже без отзывов.
+        features = []
+        # Пропуски сведений об организации также сохраняются как JSON null.
+        organization_records = (
+            # Пропуски сведений об организации также сохраняются как JSON null.
+            self.organizations.astype(object)
+            # Пропуски сведений об организации также сохраняются как JSON null.
+            .where(self.organizations.notna(), None)
+            # Пропуски сведений об организации также сохраняются как JSON null.
+            .to_dict(orient="records")
+        )
+        # Координаты берём непосредственно из таблицы, без округления и перепроецирования.
+        for properties in organization_records:
+            # Сохраняем строковый идентификатор и внутри свойств, и как id объекта GeoJSON.
+            oid = properties["organization_id"]
+            # Переносим пространственные данные в предназначенное для них поле geometry.
+            longitude, latitude = properties.pop("longitude"), properties.pop("latitude")
+            # При отсутствии хотя бы одной координаты не создаём фиктивную точку.
+            geometry = None
+            # Координаты должны быть конечными числами в диапазонах WGS84.
+            if longitude is not None and latitude is not None:
+                # Не записываем повреждённую геометрию после ручного редактирования таблицы.
+                if not (
+                    # Не записываем повреждённую геометрию после ручного редактирования таблицы.
+                    math.isfinite(longitude)
+                    # Не записываем повреждённую геометрию после ручного редактирования таблицы.
+                    and math.isfinite(latitude)
+                    # Не записываем повреждённую геометрию после ручного редактирования таблицы.
+                    and -180 <= longitude <= 180
+                    # Не записываем повреждённую геометрию после ручного редактирования таблицы.
+                    and -90 <= latitude <= 90
+                ):
+                    # Ошибка экспорта не должна повредить уже существующий файл.
+                    raise ValueError(f"Некорректные координаты организации {oid}.")
+                # Стандартный JSON сохраняет исходную точность чисел долготы и широты.
+                geometry = {"type": "Point", "coordinates": [longitude, latitude]}
+            # У каждой организации находится только её собственный массив отзывов.
+            properties["reviews"] = grouped.get(oid, [])
+            # Размер экспорта отличаем от счётчиков исходного снимка при фильтрации.
+            properties["exported_reviews"] = len(properties["reviews"])
+            # Сохраняем диагностику полноты, не подменяя её результатом фильтрации.
+            properties["completeness"] = (
+                # Сохраняем диагностику полноты, не подменяя её результатом фильтрации.
+                self.metadata.get("review_runs", {})
+                # Сохраняем диагностику полноты, не подменяя её результатом фильтрации.
+                .get(oid, {})
+                # Сохраняем диагностику полноты, не подменяя её результатом фильтрации.
+                .get("completeness")
+            )
+            # Общая оценка и состояние сбора остаются среди свойств организации.
+            features.append(
+                # Общая оценка и состояние сбора остаются среди свойств организации.
+                {"type": "Feature", "id": oid, "geometry": geometry, "properties": properties}
+            )
+        # Передаём ограничения исходного сбора и выбранный режим экспорта.
+        metadata = {
+            # Сохраняем явное ограничение охвата видимой выдачей.
+            "coverage": self.metadata.get("coverage"),
+            # Сохраняем поле max_reviews.
+            "max_reviews": self.metadata.get("max_reviews"),
+            # Сохраняем поле confirmed_only.
+            "confirmed_only": confirmed_only,
+        }
+        # GeoJSON содержит все организации и не объявляет частичный снимок полным.
+        return {"type": "FeatureCollection", "features": features, "metadata": metadata}
+
+    # Записываем одну коллекцию с отдельными объектами организаций и вложенными отзывами.
+    def save_geojson(self, path, *, confirmed_only=False):
+        # Разрешаем пути, переданные строкой или объектом Path.
+        target = Path(path)
+        # Используем существующую атомарную запись с UTF-8 и запретом NaN.
+        save_result(target, self.to_geojson(confirmed_only=confirmed_only))
+        # Возвращаем путь к созданному файлу для дальнейшей работы.
+        return target
 
 
 # Позволяем узнать готовые категории без запуска браузера.
@@ -236,7 +336,9 @@ def _area_config(city, bbox, geometry, config, tags, queries):
             # Не превращаем одну строку в последовательность отдельных букв.
             if not isinstance(values, (list, tuple)) or any(
                 # Не превращаем одну строку в последовательность отдельных букв.
-                not isinstance(value, str) for value in values
+                not isinstance(value, str)
+                # Не превращаем одну строку в последовательность отдельных букв.
+                for value in values
             ):
                 # Требуем понятный формат списка поисковых настроек.
                 raise ValueError(f"{key} должен быть списком строк.")
@@ -269,7 +371,11 @@ def load_results(output="review_results", *, max_reviews=None, with_reviews=True
             # Поиск без отзывов не подмешивает старые файлы отзывов из этой папки.
             snapshot = (
                 # Поиск без отзывов не подмешивает старые файлы отзывов из этой папки.
-                read_snapshot(folder / "reviews" / f"{oid}{suffix}.json") if with_reviews else {}
+                read_snapshot(folder / "reviews" / f"{oid}{suffix}.json")
+                # Поиск без отзывов не подмешивает старые файлы отзывов из этой папки.
+                if with_reviews
+                # Если файла нет, начинаем без сохранённого результата.
+                else {}
             )
             # Сохраняем подробную диагностику без дублирования текстов в памяти.
             runs[oid] = {key: value for key, value in snapshot.items() if key != "reviews"}
@@ -389,14 +495,24 @@ def load_results(output="review_results", *, max_reviews=None, with_reviews=True
         # Не превращаем неизвестное значение в ноль.
         org_frame[key] = pd.to_numeric(org_frame[key], errors="coerce").astype(
             # Не превращаем неизвестное значение в ноль.
-            "Float64" if key in {"longitude", "latitude", "rating"} else "Int64"
+            "Float64"
+            # Не превращаем неизвестное значение в ноль.
+            if key in {"longitude", "latitude", "rating"}
+            # Не превращаем неизвестное значение в ноль.
+            else "Int64"
         )
     # Звёзды отдельного отзыва — целое число, а не общая оценка организации.
     review_frame["rating"] = pd.to_numeric(review_frame["rating"], errors="coerce").astype("Int64")
     # Разбираем даты в UTC, сохраняя исходную строку в date_raw.
     review_frame["date"] = pd.to_datetime(
         # Разбираем даты в UTC, сохраняя исходную строку в date_raw.
-        review_frame["date"], utc=True, errors="coerce", format="mixed"
+        review_frame["date"],
+        # Разбираем даты в UTC, сохраняя исходную строку в date_raw.
+        utc=True,
+        # Разбираем даты в UTC, сохраняя исходную строку в date_raw.
+        errors="coerce",
+        # Разбираем даты в UTC, сохраняя исходную строку в date_raw.
+        format="mixed",
     )
     # Старые снимки без признака текущего полного текста считаются неподтверждёнными.
     review_frame["confirmed"] = (
@@ -416,13 +532,17 @@ def load_results(output="review_results", *, max_reviews=None, with_reviews=True
     # Один раз считаем подтверждённые строки по организациям.
     confirmed_counts = (
         # Один раз считаем подтверждённые строки по организациям.
-        review_frame.loc[review_frame["confirmed"]].groupby("organization_id").size()
+        review_frame.loc[review_frame["confirmed"]]
+        # Один раз считаем подтверждённые строки по организациям.
+        .groupby("organization_id")
+        # Один раз считаем подтверждённые строки по организациям.
+        .size()
     )
     # Готовность требует и допустимого статуса, и подтверждения всех сохранённых строк.
     org_frame["reviews_ready"] = org_frame["review_status"].isin(
         # Готовность требует и допустимого статуса, и подтверждения всех сохранённых строк.
         ["complete", "capped"]
-    # Готовность требует и допустимого статуса, и подтверждения всех сохранённых строк.
+        # Готовность требует и допустимого статуса, и подтверждения всех сохранённых строк.
     ) & org_frame["saved_reviews"].eq(org_frame["organization_id"].map(confirmed_counts).fillna(0))
     # Объединяем таблицы и диагностику в один объект Python.
     return CollectionResult(org_frame, review_frame, metadata)
@@ -484,7 +604,11 @@ def collect_area(
     # None означает сбор всех доступных отзывов, а не скрытый лимит.
     if max_reviews is not None and (
         # None означает сбор всех доступных отзывов, а не скрытый лимит.
-        isinstance(max_reviews, bool) or not isinstance(max_reviews, int) or max_reviews < 1
+        isinstance(max_reviews, bool)
+        # None означает сбор всех доступных отзывов, а не скрытый лимит.
+        or not isinstance(max_reviews, int)
+        # None означает сбор всех доступных отзывов, а не скрытый лимит.
+        or max_reviews < 1
     ):
         # Исключаем нулевые, отрицательные и дробные лимиты.
         raise ValueError("max_reviews должен быть положительным целым числом или None.")
@@ -512,7 +636,9 @@ def collect_area(
         # Отклоняем NaN и сохраняем кириллицу без экранирования.
         config_path.write_text(
             # Отклоняем NaN и сохраняем кириллицу без экранирования.
-            json.dumps(area, ensure_ascii=False, allow_nan=False), encoding="utf-8"
+            json.dumps(area, ensure_ascii=False, allow_nan=False),
+            # Читаем и записываем кириллицу в UTF-8.
+            encoding="utf-8",
         )
         # Передаём аргументы списком, без shell и подстановки пользовательского текста в команды.
         command = [

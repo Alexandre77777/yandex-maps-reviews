@@ -125,6 +125,135 @@ def snapshot(folder, rows, status="stalled", suffix=""):
 
 # Проверяем поведение интерфейса на данных, а не только состав вызова.
 class PackageTests(unittest.TestCase):
+    # GeoJSON объединяет каждую организацию только с её отзывами без потери точности.
+    def test_geojson_groups_dates_and_missing_values(self):
+        # Изолируем вымышленные данные от реальных снимков.
+        with tempfile.TemporaryDirectory() as temporary:
+            # Подготавливаем состав из двух организаций.
+            folder = Path(temporary)
+            # У первой организации точные координаты, у второй положение неизвестно.
+            manifest(
+                # У первой организации точные координаты, у второй положение неизвестно.
+                folder,
+                [
+                    # У первой организации точные координаты, у второй положение неизвестно.
+                    dict(
+                        # У первой организации точные координаты, у второй положение неизвестно.
+                        ORGANIZATION, coordinates_lon_lat=[37.123456789012344, 55.123456789012344]
+                    ),
+                    # У первой организации точные координаты, у второй положение неизвестно.
+                    dict(ORGANIZATION, organization_id="102", coordinates_lon_lat=None),
+                ],
+            )
+            # Сохраняем текущий и прежний отзывы первой организации.
+            snapshot(folder, [review(1), review(2, "previous_snapshot")])
+            # Вторая организация пока не имеет отзывного снимка.
+            result = load_results(folder)
+            # Проверяем экспорт без установки или импорта GeoPandas.
+            with patch.dict("sys.modules", {"geopandas": None}):
+                # Возвращаем обычный словарь, совместимый с JSON.
+                data = result.to_geojson()
+                # Атомарно сохраняем коллекцию на диск.
+                path = result.save_geojson(folder / "export" / "organizations.geojson")
+            # Объектов столько же, сколько организаций, включая организацию без отзывов.
+            self.assertEqual(len(data["features"]), 2)
+            # Геометрия хранит точные координаты без округления Pandas JSON.
+            self.assertEqual(
+                # Геометрия хранит точные координаты без округления Pandas JSON.
+                data["features"][0]["geometry"]["coordinates"],
+                # Геометрия хранит точные координаты без округления Pandas JSON.
+                [37.123456789012344, 55.123456789012344],
+            )
+            # Не подменяем неизвестное положение центром выбранной области.
+            self.assertIsNone(data["features"][1]["geometry"])
+            # Отзывы первой организации не попадают к соседнему объекту.
+            self.assertEqual(data["features"][1]["properties"]["reviews"], [])
+            # Старые записи сохраняются с явным признаком неподтверждённости.
+            self.assertFalse(data["features"][0]["properties"]["reviews"][1]["confirmed"])
+            # Дата сериализуется в UTC и остаётся связанной с исходной строкой.
+            self.assertEqual(
+                # Дата сериализуется в UTC и остаётся связанной с исходной строкой.
+                data["features"][0]["properties"]["reviews"][0]["date"],
+                # Дата сериализуется в UTC и остаётся связанной с исходной строкой.
+                "2026-10-01T09:00:00+00:00",
+            )
+            # Отсутствующий идентификатор исходного отзыва должен стать null.
+            self.assertIsNone(data["features"][0]["properties"]["reviews"][0]["source_review_id"])
+            # Записанный файл строго соответствует возвращённому GeoJSON.
+            self.assertEqual(json.loads(path.read_text(encoding="utf-8")), data)
+            # В исходных таблицах сохраняются дата Pandas и исходные столбцы координат.
+            self.assertIn("longitude", result.organizations)
+            # Экспорт не меняет дату в вызывающем коде.
+            self.assertEqual(result.reviews.loc[0, "date"].hour, 9)
+
+    # Фильтрация не меняет состояние исходного снимка и не теряет организации.
+    def test_geojson_confirmed_filter_and_empty_result(self):
+        # Подготавливаем частичный снимок с двумя сохранёнными отзывами.
+        with tempfile.TemporaryDirectory() as temporary:
+            # Создаём манифест и отзывы.
+            folder = Path(temporary)
+            # Записываем одну организацию.
+            manifest(folder)
+            # Одна строка подтверждена, другая сохранена только из прошлого снимка.
+            snapshot(folder, [review(1), review(2, "previous_snapshot")])
+            # Загружаем исходные данные.
+            result = load_results(folder)
+            # Выгружаем только подтверждённые полные записи.
+            filtered = result.to_geojson(confirmed_only=True)
+            # К объекту относится лишь текущий отзыв.
+            properties = filtered["features"][0]["properties"]
+            # Размер экспорта указан отдельно от размера исходного снимка.
+            self.assertEqual(properties["exported_reviews"], 1)
+            # Исходный счётчик сохранённых строк не подменяется фильтрованным.
+            self.assertEqual(properties["saved_reviews"], 2)
+            # Частичный снимок остаётся частичным после фильтрации.
+            self.assertEqual(properties["review_status"], "stalled")
+            # В свойствах остаётся исходная диагностика полноты.
+            self.assertEqual(properties["completeness"]["retained_from_previous"], 1)
+            # Признак фильтрации доступен на уровне коллекции.
+            self.assertTrue(filtered["metadata"]["confirmed_only"])
+            # Неправильный тип фильтра не принимается молча.
+            with self.assertRaises(ValueError):
+                # Строка False не является логическим False.
+                result.to_geojson(confirmed_only="False")
+            # Пустой поиск даёт корректную пустую коллекцию.
+            manifest(folder, [])
+            # Все столбцы сохраняются, но объектов нет.
+            self.assertEqual(load_results(folder).to_geojson()["features"], [])
+
+    # Неудачный экспорт не должен затирать уже записанный GeoJSON.
+    def test_geojson_atomic_failure_preserves_previous_file(self):
+        # Проверяем запись в независимой папке.
+        with tempfile.TemporaryDirectory() as temporary:
+            # Создаём корректный исходный снимок.
+            folder = Path(temporary)
+            # Записываем манифест.
+            manifest(folder)
+            # Загружаем организацию без отзывов.
+            result = load_results(folder, with_reviews=False)
+            # Создаём прежний корректный файл экспорта.
+            target = result.save_geojson(folder / "organizations.geojson")
+            # Сохраняем точные байты для проверки отсутствия повреждения.
+            original = target.read_bytes()
+            # Подставляем ошибочную координату в изменяемой таблице пользователя.
+            result.organizations.loc[0, "longitude"] = float("inf")
+            # Ошибка должна возникнуть до замены файла.
+            with self.assertRaises(ValueError):
+                # Пытаемся обновить файл повреждённой геометрией.
+                result.save_geojson(target)
+            # Прежний экспорт остаётся без изменений.
+            self.assertEqual(target.read_bytes(), original)
+            # Проверяем также отказ сериализации произвольного пользовательского свойства.
+            result.organizations.loc[0, "longitude"] = 37.105
+            # Значения такого типа не поддерживаются JSON.
+            result.metadata["review_runs"]["101"]["completeness"] = {"invalid": object()}
+            # Атомарная запись должна оставить старый файл при ошибке JSON.
+            with self.assertRaises(TypeError):
+                # Запись временного файла не заменяет прежний результат при отказе.
+                result.save_geojson(target)
+            # Ни одна ошибка не повреждает уже готовый файл.
+            self.assertEqual(target.read_bytes(), original)
+
     # Полный справочник сохраняет прежние ключи и все опубликованные рубрики.
     def test_full_catalog_and_aliases(self):
         # Проверяем единственный источник категорий для карты и Python.

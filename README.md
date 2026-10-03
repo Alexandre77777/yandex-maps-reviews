@@ -91,6 +91,42 @@ organization_id            geometry
 
 Неизвестные координаты дают отсутствующую геометрию. Отзывы остаются в отдельной таблице.
 
+### 💾 Сохранить организации с отзывами в GeoJSON
+
+```python
+# Сохраняем все организации; у каждого объекта — свои оценки, отзывы и координаты.
+print(result.save_geojson("organizations.geojson"))
+# По желанию исключаем неподтверждённые отзывы, сохраняя все организации.
+print(result.save_geojson("confirmed.geojson", confirmed_only=True))
+```
+
+```text
+organizations.geojson
+confirmed.geojson
+```
+
+Одна организация — один `Feature`, её отзывы вложены в `properties.reviews`. Ниже сокращённый пример одного объекта; в файле также сохраняются остальные поля и признаки полноты.
+
+```json
+{
+  "type": "FeatureCollection",
+  "features": [{
+    "type": "Feature",
+    "id": "101",
+    "geometry": {"type": "Point", "coordinates": [37.62, 55.75]},
+    "properties": {
+      "organization_id": "101",
+      "name": "Кафе «Пример»",
+      "rating": 4.7,
+      "review_status": "complete",
+      "reviews": [{"text": "Вкусный кофе.", "rating": 5, "confirmed": true}]
+    }
+  }]
+}
+```
+
+Для словаря Python без записи файла используйте `result.to_geojson()`. Экспорт не требует GeoPandas; неизвестное положение сохраняется как `geometry: null`. Фильтрация отзывов не меняет исходный статус полноты.
+
 ## 📍 Другие способы выбора территории
 
 Передайте **ровно один** параметр: `city`, `bbox`, `geometry` или `config`.
