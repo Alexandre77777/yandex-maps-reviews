@@ -267,12 +267,18 @@ fetch('categories.json').then(response => {
   const container = document.getElementById('categories');
   // Удаляем временное сообщение загрузки.
   container.textContent = '';
+  // Собираем большой список вне страницы и вставляем его одним действием.
+  const fragment = document.createDocumentFragment();
   // Создаём выбор для каждой предустановки.
   for (const [key, item] of Object.entries(catalog.categories)) {
     // Объединяем флажок и текст в доступную подпись.
     const label = document.createElement('label');
     // Применяем оформление строки.
     label.className = 'category';
+    // Подготавливаем строку поиска один раз, включая тематическую группу.
+    label.dataset.search = (item.label + ' ' + (item.group || '')).toLocaleLowerCase('ru').replaceAll('ё', 'е');
+    // Показываем группу при наведении на рубрику.
+    label.title = item.group || 'Готовая поисковая настройка';
     // Создаём флажок выбора.
     const input = document.createElement('input');
     // Разрешаем выбрать несколько категорий.
@@ -284,8 +290,26 @@ fetch('categories.json').then(response => {
     // Используем текст без исполнения HTML из файла.
     label.append(input, document.createTextNode(item.label));
     // Показываем готовую категорию.
-    container.append(label);
+    fragment.append(label);
   }
+  // Вставляем все категории без последовательной перерисовки каждой строки.
+  container.append(fragment);
+  // Используем одно поле поиска без изменения состояния выбранных флажков.
+  const filter = document.getElementById('category-filter');
+  // Фильтруем уже созданные строки по названию и группе.
+  const filterCategories = () => {
+    // Игнорируем регистр и различие букв е и ё.
+    const words = filter.value.trim().toLocaleLowerCase('ru').replaceAll('ё', 'е').split(/\s+/).filter(Boolean);
+    // Список не пересоздаётся, поэтому выбранные категории сохраняются.
+    for (const label of container.children) {
+      // Явно отключаем отображение строки независимо от правила display для класса.
+      label.style.display = words.every(word => label.dataset.search.includes(word)) ? '' : 'none';
+    }
+  };
+  // Обновляем список после каждого изменения поисковой строки.
+  filter.addEventListener('input', filterCategories);
+  // Применяем также текст, введённый до завершения загрузки справочника.
+  filterCategories();
   // Проверяем доступность экспорта.
   update();
 // Объясняем необходимость локального статического сервера.

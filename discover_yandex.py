@@ -256,7 +256,10 @@ def resolve_searches(categories, queries):
     # Разрешаем выбирать категорию по ключу или отображаемому названию.
     aliases = {normalize_label(key): key for key in catalog}
     # Добавляем русские названия к допустимым обозначениям.
-    aliases.update({normalize_label(item["label"]): key for key, item in catalog.items()})
+    # Сохраняем прежние короткие ключи при совпадении названия с опубликованной рубрикой.
+    for key, item in catalog.items():
+        # Первое соответствие не заменяется одинаковым названием из полного справочника.
+        aliases.setdefault(normalize_label(item["label"]), key)
     # Подготавливаем очередь без повторов.
     selections = {}
     # Обрабатываем выбранные готовые категории.

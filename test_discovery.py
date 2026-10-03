@@ -202,10 +202,24 @@ class DiscoveryTests(unittest.TestCase):
     def test_catalog_and_custom_queries(self):
         # Загружаем локальный список категорий.
         catalog = load_categories()
-        # Проверяем каждую готовую категорию на совместимость ключа и русского названия.
+        # Разрешаем весь справочник за два прохода вместо повторного чтения для каждой рубрики.
+        keyed = {item["key"]: item for item in resolve_searches(list(catalog), [])}
+        # Повторяющиеся названия документации разрешаются в первое соответствие.
+        named = {
+            # Повторяющиеся названия документации разрешаются в первое соответствие.
+            item["label"]: item
+            # Повторяющиеся названия документации разрешаются в первое соответствие.
+            for item in resolve_searches([item["label"] for item in catalog.values()], [])
+        }
+        # Проверяем каждую настройку, включая одноимённые рубрики разных разделов.
         for key, item in catalog.items():
-            # Оба способа выбора должны давать одно поисковое задание.
-            self.assertEqual(resolve_searches([key], []), resolve_searches([item["label"]], []))
+            # Одинаковые названия должны задавать одинаковую поисковую фразу.
+            self.assertEqual(
+                # Одинаковые названия должны задавать одинаковую поисковую фразу.
+                keyed[key]["query"].casefold(), named[item["label"]]["query"].casefold()
+            )
+            # Номер раздела не меняет фактическую рубрику найденной карточки.
+            self.assertEqual(keyed[key]["rubrics"], named[item["label"]]["rubrics"])
             # Предустановка должна содержать фактические рубрики для проверки результата.
             self.assertTrue(item["rubrics"])
         # Повтор ключа не создаёт лишнюю поисковую страницу.
@@ -238,12 +252,16 @@ class DiscoveryTests(unittest.TestCase):
         # Неизвестные координаты сохраняются как причина исключения.
         self.assertEqual(
             # Неизвестные координаты сохраняются как причина исключения.
-            classify_candidate(rows["103"], BBOX, CAFE["rubrics"]), "missing_coordinates"
+            classify_candidate(rows["103"], BBOX, CAFE["rubrics"]),
+            # Неизвестные координаты сохраняются как причина исключения.
+            "missing_coordinates",
         )
         # Запрос кафе не должен принимать школу только по положению.
         self.assertEqual(
             # Запрос кафе не должен принимать школу только по положению.
-            classify_candidate(rows["101"], BBOX, ["Общеобразовательная школа"]), "rubric_mismatch"
+            classify_candidate(rows["101"], BBOX, ["Общеобразовательная школа"]),
+            # Запрос кафе не должен принимать школу только по положению.
+            "rubric_mismatch",
         )
 
     # Проверяем сохранение поиска, HTTP 429 и совместимость поискового кэша.
@@ -276,7 +294,7 @@ class DiscoveryTests(unittest.TestCase):
             digest = hashlib.sha256(
                 # Используем ту же формулу ключа, что и самостоятельный запуск.
                 json.dumps([BBOX, CAFE, 1], sort_keys=True, ensure_ascii=False).encode()
-            # Используем ту же формулу ключа, что и самостоятельный запуск.
+                # Используем ту же формулу ключа, что и самостоятельный запуск.
             ).hexdigest()[:16]
             # Сохраняем проверенный поисковый результат.
             (output / "search" / f"{digest}.json").write_text(json.dumps(result), encoding="utf-8")
@@ -302,7 +320,11 @@ class DiscoveryTests(unittest.TestCase):
                 str(output),
             ]
             # Перехватываем создание браузера, не меняя проверку совместимости данных.
-            with patch("sys.argv", argv), patch("discover_yandex.sync_playwright") as browser_start:
+            with patch("sys.argv", argv), patch(
+                # Перехватываем создание браузера, не меняя проверку совместимости данных.
+                "discover_yandex.sync_playwright"
+            # Перехватываем создание браузера, не меняя проверку совместимости данных.
+            ) as browser_start:
                 # Запускаем поиск с готовым совместимым кэшем.
                 discover_main()
                 # Ни Playwright, ни Chromium не должны запускаться.
