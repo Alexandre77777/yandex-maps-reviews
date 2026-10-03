@@ -38,6 +38,8 @@ from storage import read_snapshot, output_lock
 
 # Учитываем необходимые загрузки одинаково в поиске и сборе отзывов.
 from page_loads import PageLoads
+# Запускаем совместимый браузер с автоматической установкой при отсутствии.
+from browser_setup import launch_chromium
 
 # Обрабатываем ошибки запуска одинаково для обоих сборщиков.
 from collect_yandex import run_cli
@@ -1277,11 +1279,8 @@ def main():
         searches = []
         # Подключаем Playwright для одной общей сессии поиска и отзывов.
         with sync_playwright() as playwright:
-            # Запускаем браузер с явно заданным путём только при необходимости.
-            browser = playwright.chromium.launch(
-                # Запускаем браузер с явно заданным путём только при необходимости.
-                **({"executable_path": args.executable} if args.executable else {})
-            )
+            # При отсутствии устанавливаем совместимый Chromium и открываем браузер.
+            browser = launch_chromium(playwright, args.executable)
             # Гарантируем закрытие браузера после всей очереди.
             try:
                 # Создаём временную вкладку для чтения фактической версии браузера.

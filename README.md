@@ -10,7 +10,16 @@
 
 ## 🚀 Установка
 
-Нужны Python 3.11 или новее и интернет. Откройте терминал в папке клонированного или распакованного репозитория.
+Нужны Python 3.11 или новее, Git и интернет.
+
+```bash
+# Клонируем репозиторий.
+git clone https://github.com/Alexandre77777/yandex-maps-reviews.git
+# Переходим в папку проекта.
+cd yandex-maps-reviews
+```
+
+До публикации репозитория используйте локальную копию или распакованный ZIP и откройте терминал в его папке. Рекомендуется отдельное окружение:
 
 ```bash
 # Создаём отдельное окружение.
@@ -20,13 +29,26 @@ python -m venv .venv
 Активируйте его: Windows PowerShell — `.\.venv\Scripts\Activate.ps1`; Linux/macOS — `source .venv/bin/activate`. Если PowerShell запрещает активацию, используйте `.\.venv\Scripts\python.exe` вместо `python` в следующих командах.
 
 ```bash
-# Устанавливаем пакет вместе с поддержкой GeoPandas.
-python -m pip install ".[geo]"
-# Устанавливаем совместимый Chromium.
-python -m playwright install chromium
+# Устанавливаем пакет со всеми зависимостями Python, включая GeoPandas.
+python -m pip install .
 ```
 
-После установки доступны `import yandex_maps_reviews` и вызовы ниже. Для обычных таблиц без GeoPandas достаточно `python -m pip install .`. В Jupyter/Colab используйте `%pip install "/путь/к/репозиторию[geo]"` в окружении текущего ядра. Особенности установки — в [подробной инструкции](docs/USAGE.md#установка).
+Pip установит недостающие библиотеки и приведёт их версии к требованиям пакета. Совместимый Chromium автоматически скачивается при первом запуске сбора, если нужной версии ещё нет. Отдельные команды для GeoPandas и браузера не требуются.
+
+После установки доступны `import yandex_maps_reviews` и вызовы ниже. В Jupyter/Colab используйте `%pip install "/путь/к/репозиторию"` в окружении текущего ядра. Особенности установки — в [подробной инструкции](docs/USAGE.md#установка).
+
+### ☁️ Google Colab
+
+В первой ячейке клонируйте репозиторий и установите пакет. Виртуальное окружение создавать не нужно:
+
+```python
+# Клонируем репозиторий в файловую систему Colab.
+!git clone https://github.com/Alexandre77777/yandex-maps-reviews.git /content/yandex-maps-reviews
+# Устанавливаем пакет в окружение текущего ноутбука.
+%pip install /content/yandex-maps-reviews
+```
+
+Далее выполняйте примеры Python ниже. В Colab сборщик автоматически подготавливает Chromium вместе с системными библиотеками Linux. GPU не нужен. Готовый пример — [ноутбук для Colab](examples/colab_quickstart.ipynb).
 
 ## 🐍 Собрать организации и отзывы
 
@@ -77,7 +99,7 @@ print(len(confirmed))
 Строка с `confirmed=False` сохранена для прозрачности результата, но в эту выборку не входит. Причина доступна в `observation`, `full_text_confirmed` и диагностике `result.metadata`.
 
 ```python
-# Создаём точки организаций в WGS84; требуются пространственные зависимости.
+# Создаём точки организаций в WGS84.
 geo = result.to_geopandas()
 # Показываем идентификаторы и координаты точек.
 print(geo[["organization_id", "geometry"]].head(3).to_string(index=False))
@@ -1967,8 +1989,4 @@ python -m unittest discover
 OK
 ```
 
-Для всех проверок нужны установленные пространственные зависимости и Chromium. Проверенная конфигурация — Windows и Python 3.11; Linux/macOS отдельно не проверялись. Подробности: [инструкция](docs/USAGE.md), [отчёт проверок](docs/RELEASE_TESTS.md), [измерения производительности](docs/PERFORMANCE.md).
-
-## 📄 Автор и лицензия
-
-Автор — **Alexandre**. Код: [MIT](LICENSE). Границы городов: © OpenStreetMap contributors, [ODbL 1.0](boundaries/README.md).
+Браузерные проверки используют Chromium, который сборщик устанавливает при первом запуске. Проверенная конфигурация — Windows и Python 3.11; Linux/macOS отдельно не проверялись. Подробности: [инструкция](docs/USAGE.md), [отчёт проверок](docs/RELEASE_TESTS.md), [измерения производительности](docs/PERFORMANCE.md).

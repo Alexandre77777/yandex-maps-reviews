@@ -51,6 +51,8 @@ from storage import save_result, read_snapshot, output_lock
 
 # Наблюдаем завершение загрузок по метаданным обычного браузера.
 from page_loads import PageLoads
+# Запускаем совместимый браузер с автоматической установкой при отсутствии.
+from browser_setup import launch_chromium
 
 
 # Задаём селектор контейнера отдельного отзыва.
@@ -1889,14 +1891,8 @@ def main():
             return
         # Открываем Playwright с автоматическим освобождением ресурсов.
         with sync_playwright() as playwright:
-            # Задаём параметры запуска Chromium.
-            options = {"headless": True}
-            # При необходимости используем указанный Chromium.
-            if args.executable:
-                # Передаём указанный путь к исполняемому файлу Chromium.
-                options["executable_path"] = args.executable
-            # Запускаем Chromium для чтения страниц.
-            browser = playwright.chromium.launch(**options)
+            # При отсутствии устанавливаем совместимый Chromium и открываем браузер.
+            browser = launch_chromium(playwright, args.executable)
             # Обрабатываем возможную ошибку следующего этапа.
             try:
                 # Открываем временную вкладку для определения версии браузера.

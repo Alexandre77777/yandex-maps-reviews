@@ -11,11 +11,7 @@ description = "Поиск организаций и сбор отзывов с �
 readme = "README.md"
 requires-python = ">=3.11"
 authors = [{name = "Alexandre", email = "sa.32@mail.ru"}]
-dependencies = ["playwright==1.52.0", "shapely==2.1.2", "pandas>=2.2,<4"]
-
-# Пространственные таблицы нужны только при явном выборе этой возможности.
-[project.optional-dependencies]
-geo = ["geopandas>=1.0,<2"]
+dependencies = ["playwright==1.52.0", "shapely==2.1.2", "pandas>=2.2,<4", "geopandas>=1.0,<2"]
 
 # Сохраняем существующие сценарии рядом с интерфейсом пакета.
 [tool.setuptools]
